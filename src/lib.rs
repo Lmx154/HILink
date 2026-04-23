@@ -388,6 +388,13 @@ pub mod valid {
     pub const RADIO: u32 = 1 << 6;
 }
 
+pub mod header_flags {
+    pub const REQUEST_ACK: u8 = 1 << 0;
+    pub const RETRANSMISSION: u8 = 1 << 1;
+    pub const MORE_FRAGMENTS: u8 = 1 << 2;
+    pub const URGENT_CONTROL: u8 = 1 << 3;
+}
+
 pub mod response_flags {
     pub const ARMED: u32 = 1 << 0;
     pub const FAILSAFE: u32 = 1 << 1;

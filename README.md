@@ -71,6 +71,44 @@ let encoded_len = hilink::encoded_frame_len(hilink::HilSensorFrame::WIRE_LEN);
 `encoded_frame_len` returns a conservative maximum buffer size including the
 final `0x00` delimiter.
 
+## Protocol Conventions
+
+HIL messages use these frame, sign, and unit conventions:
+
+- world frame: NED, with +X north, +Y east, and +Z down
+- local position: `position_ned_m` is meters from the simulator's chosen local
+  NED origin
+- GPS position: `lat_deg` and `lon_deg` are WGS84 degrees, and `alt_msl_m` is
+  altitude above mean sea level in meters
+- body frame: +X forward, +Y right, and +Z down
+- quaternion layout: `attitude_quat` is `[w, x, y, z]`
+- quaternion meaning: `attitude_quat` is a unit quaternion that rotates vectors
+  from body frame to NED frame
+- gyro: `gyro_rps` is body angular rate in rad/s, positive by the right-hand
+  rule about each body axis
+- accel: `accel_mps2` is body-frame specific force in m/s^2, not inertial
+  acceleration; a level stationary vehicle reports approximately
+  `[0.0, 0.0, -9.81]`
+- magnetometer: `mag_ut` is body-frame magnetic field in microtesla
+- barometer: `baro_altitude_m` is pressure-derived altitude above mean sea
+  level in meters using the simulator/backend's configured atmosphere and
+  reference
+
+Actuator commands use normalized motor units:
+
+- `motor_cmd[i]` is a normalized unsigned command for motor `i`
+- `0` means stopped/off
+- `65535` means maximum command
+- the FC must saturate commands to `0..=65535` before sending
+- the host/simulator maps normalized commands to rotor velocity, thrust, PWM, or
+  another backend-specific actuator model
+- if `response_flags::MOTORS_VALID` is clear, the host must not apply
+  `motor_cmd`; for first bring-up it should hold the previous valid command or
+  command zero according to the test's configured safety policy
+- floating-point NaN or infinity values are invalid on the wire; senders should
+  clear the matching validity flag or command flag instead of sending non-finite
+  sensor, estimator, or actuator values
+
 ## Header
 
 Every message starts with this header:
@@ -93,15 +131,31 @@ Header fields:
 
 - `version`: protocol version, currently `1`
 - `msg_type`: numeric `MsgType`
-- `flags`: packet-level flags, reserved for future use
+- `flags`: packet-level flags
 - `reserved`: must be sent as `0`
-- `seq`: sender-side sequence number
-- `send_time_ms`: sender local transport timestamp in milliseconds
+- `seq`: sender-side sequence number, monotonic modulo `u16`
+- `send_time_ms`: sender-local transport timestamp in milliseconds
 - `payload_len`: serialized payload length in bytes
 
-Important timing rule:
+Header flags:
+
+```rust
+pub mod header_flags {
+    pub const REQUEST_ACK: u8 = 1 << 0;
+    pub const RETRANSMISSION: u8 = 1 << 1;
+    pub const MORE_FRAGMENTS: u8 = 1 << 2;
+    pub const URGENT_CONTROL: u8 = 1 << 3;
+}
+```
+
+Timing rules:
 
 - `Header::send_time_ms` is when the packet was sent by the sender
+- `Header::send_time_ms` is only for transport diagnostics and latency
+  estimates
+- sender-local clock synchronization is not assumed
+- wraparound of `send_time_ms` is expected
+- estimator and control timing must not use `send_time_ms`
 - `SimStamp` is the simulated instant that the payload belongs to
 
 Do not overload one field to mean both.
@@ -182,6 +236,50 @@ Command/control messages:
 - `TofWaypoint`
 - `MissionWaypoint`
 - `Rtl`
+
+## Sequence and Acknowledgement Policy
+
+Each sender maintains its own `Header::seq` counter:
+
+- increment `seq` once for every outbound packet from that sender
+- wrap from `65535` to `0`
+- compare sequence numbers modulo `u16`; do not treat wraparound as a protocol
+  fault by itself
+- duplicates of command messages may be ignored after the command has already
+  been handled
+- streamed HIL traffic is matched by `SimStamp`, not by `seq`
+
+`AckPayload` and `NackPayload` refer to both sequence number and message type:
+
+```rust
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AckPayload {
+    pub acked_seq: u16,
+    pub acked_msg_type: u8,
+    pub status: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NackPayload {
+    pub rejected_seq: u16,
+    pub rejected_msg_type: u8,
+    pub reason: u8,
+}
+```
+
+First-version reliability policy:
+
+- `Ack` / `Nack` are for control and command messages such as `Arm`, `Disarm`,
+  `Rtl`, waypoint commands, and optional `HilReady` confirmation
+- `HilSensorFrame` and `HilResponseFrame` are not retransmitted
+- HIL sensor/response frames are not acked in the normal runtime loop
+- a retransmitted command should set `header_flags::RETRANSMISSION`
+- if a command needs positive confirmation, set `header_flags::REQUEST_ACK`
+- duplicate HIL frames with an already-processed `sim_tick` are dropped
+- out-of-order HIL frames are protocol errors during the deterministic bring-up
+  loop
 
 ## HIL Ready Signal
 
@@ -325,6 +423,11 @@ means the simulator can directly match:
 - estimator output for tick `N`
 - actuator output for tick `N`
 
+`motor_cmd` follows the normalized actuator convention from
+[Protocol Conventions](#protocol-conventions): `0` is off, `65535` is maximum,
+and the simulator/backend owns the mapping from normalized command to the
+physical actuator model.
+
 ## Other Payloads
 
 Messages with `SimStamp`:
@@ -453,7 +556,7 @@ Simulator/backend:
 3. Read simulator tick and simulated time.
 4. Build `HilSensorFrame { stamp: SimStamp { sim_tick, sim_time_us }, ... }`.
 5. Send the sensor frame over UART.
-6. Wait for `HilResponseFrame`.
+6. Wait for exactly one matching `HilResponseFrame`.
 7. Verify the response stamp matches the input stamp.
 8. Log simulator truth, sensor input, FC estimate, and FC motor output for tick
    `N`.
@@ -468,6 +571,34 @@ Flight controller:
 4. Treat `HilSensorFrame.stamp` as the authoritative sensor sample time.
 5. Run estimator/control for that input.
 6. Send `HilResponseFrame` with the same stamp.
+
+## HIL Step Failure Policy
+
+The first-version HIL loop is lockstep:
+
+- the simulator/backend allows exactly one outstanding `HilSensorFrame`
+- the simulator/backend must not send tick `N + 1` until tick `N` has either
+  produced a matching response or timed out
+- the FC should process at most one HIL sensor frame at a time
+- if the FC receives a new `HilSensorFrame` while one is already in flight, it
+  should ignore it or send `Nack`; the simulator/backend should treat either
+  outcome as a protocol error during bring-up
+- a `HilResponseFrame` whose `stamp` does not exactly match the outstanding
+  input `stamp` is a protocol error
+- a stale response for an older `sim_tick` is dropped and counted as a protocol
+  fault
+- a duplicate response for the current `sim_tick` is dropped after the first
+  valid response has been applied
+- a duplicate sensor frame for an already-processed `sim_tick` is dropped by the
+  FC
+
+Timeout policy is chosen by the host test configuration:
+
+- if no response arrives before the timeout, flag a HIL fault for that tick
+- the host should either hold the last valid motor command or command zero
+- the timeout result must be logged with the missed `SimStamp`
+- the simulator should not silently advance and later apply a stale motor
+  command to a newer tick
 
 ## Error Handling
 
