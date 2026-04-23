@@ -1,0 +1,21 @@
+[package]
+name = "hilink"
+version = "0.1.0"
+edition = "2024"
+description = "no_std-first UART protocol primitives for HIL and lightweight drone communication"
+license = "MIT"
+
+[features]
+default = []
+std = []
+
+[lib]
+name = "hilink"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hilink-demo"
+path = "src/main.rs"
+required-features = ["std"]
+
+[dependencies]
