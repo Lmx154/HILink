@@ -14,6 +14,8 @@ The first-class design goal is deterministic HIL correlation:
 The crate is intended to run in firmware and host software. It has no required
 dependencies.
 
+For a compact field-by-field lookup table, see [PROTOCOL.md](PROTOCOL.md).
+
 ## Cargo Features
 
 By default, the library builds as `no_std`.
@@ -108,6 +110,8 @@ Actuator commands use normalized motor units:
 - floating-point NaN or infinity values are invalid on the wire; senders should
   clear the matching validity flag or command flag instead of sending non-finite
   sensor, estimator, or actuator values
+- raw DShot is reserved for bench commands; normal HIL actuator output should
+  remain normalized and be mapped internally to `0` or `48..=2047`
 
 ## Header
 
@@ -215,6 +219,15 @@ pub enum MsgType {
     TofWaypoint = 44,
     MissionWaypoint = 45,
     Rtl = 46,
+
+    BenchEnable = 60,
+    BenchDisable = 61,
+    MotorTest = 62,
+    MotorSweep = 63,
+    MotorStop = 64,
+    DshotCommand = 65,
+    ActuatorStatusRequest = 66,
+    ActuatorStatus = 67,
 }
 ```
 
@@ -236,6 +249,91 @@ Command/control messages:
 - `TofWaypoint`
 - `MissionWaypoint`
 - `Rtl`
+- `BenchEnable`
+- `BenchDisable`
+- `MotorTest`
+- `MotorSweep`
+- `MotorStop`
+- `DshotCommand`
+- `ActuatorStatusRequest`
+
+Bench telemetry messages:
+
+- `ActuatorStatus`
+
+## Bench Actuator Commands
+
+Bench actuator commands are separate from both arming state and normal HIL motor
+output:
+
+```text
+Arm/Disarm        -> safety state
+Bench commands    -> direct motor validation
+HIL motor_cmd      -> simulator/control-loop output
+```
+
+`BenchEnable` enters explicit bench-test mode and should be acked or nacked. It
+uses `bench::ENABLE_MAGIC` (`0x4D4F544F`, "MOTO") and an auto-expiring
+`timeout_ms`. Firmware may require `Arm` before accepting `BenchEnable`, or may
+accept bench mode before arm while holding all motor output at zero until armed.
+When the timeout expires, all motors return to zero.
+
+`MotorTest` is the primary bring-up command. It selects motors by mask
+(`bit0=M1`, `bit1=M2`, `bit2=M3`, `bit3=M4`) and supports these modes:
+
+- `motor_test_mode::STOP` (`0`)
+- `motor_test_mode::RAW_DSHOT` (`1`)
+- `motor_test_mode::NORMALIZED` (`2`)
+
+Safety policy for `MotorTest`:
+
+- reject if disarmed
+- reject if bench mode is disabled
+- reject DShot special commands `1..=47`; use `DshotCommand` for those
+- clamp throttle to `0` or `48..=2047`, or nack out-of-range input
+- limit `duration_ms` to `bench::MAX_TEST_DURATION_MS` (`5000`)
+- command timeout always returns all motors to zero
+
+`MotorSweep` allows firmware-driven repeated validation. If multiple motor bits
+are set, firmware should sweep one motor at a time unless a later protocol
+revision adds an explicit simultaneous flag.
+
+`MotorStop` is a zero-length urgent bench stop. It immediately zeros all motors,
+is valid even when bench mode is disabled, and should be acked. It does not
+disarm the flight controller.
+
+`DshotCommand` is reserved for ESC special commands such as beep, direction, or
+save settings. Early firmware may reject all commands except known-safe beep
+commands until actuator control is stable.
+
+`ActuatorStatusRequest` is a zero-length request. `ActuatorStatus` reports what
+the firmware believes it is outputting, including `armed`, `bench_enabled`,
+`active_motor_mask`, `mode`, four `commanded_dshot` values, command age, bench
+timeout, and `actuator_flags`.
+
+Recommended bench smoke test:
+
+```text
+1. Arm
+2. BenchEnable timeout 30000 ms
+3. MotorTest M1 raw DShot 150 for 1000 ms
+4. MotorTest M2 raw DShot 150 for 1000 ms
+5. MotorTest M3 raw DShot 150 for 1000 ms
+6. MotorTest M4 raw DShot 150 for 1000 ms
+7. MotorTest all motors raw DShot 120 for 1000 ms
+8. MotorTest all motors raw DShot 200 for 1000 ms
+9. MotorStop
+10. Disarm
+```
+
+Recommended fault checks:
+
+- `MotorTest M1 250 for 5000 ms`, stop sending commands, verify timeout zero
+- `MotorTest M1 250`, then `MotorStop`, verify immediate zero
+- `MotorTest M1 250`, then `Disarm`, verify immediate zero
+- try `MotorTest` while disarmed and expect `Nack`
+- try raw DShot `47` as throttle and expect `Nack`
+- try raw DShot `2048` and expect `Nack` or clamp with `CLAMPED`
 
 ## Sequence and Acknowledgement Policy
 
@@ -272,7 +370,8 @@ pub struct NackPayload {
 First-version reliability policy:
 
 - `Ack` / `Nack` are for control and command messages such as `Arm`, `Disarm`,
-  `Rtl`, waypoint commands, and optional `HilReady` confirmation
+  `Rtl`, waypoint commands, bench commands, and optional `HilReady`
+  confirmation
 - `HilSensorFrame` and `HilResponseFrame` are not retransmitted
 - HIL sensor/response frames are not acked in the normal runtime loop
 - a retransmitted command should set `header_flags::RETRANSMISSION`
@@ -442,6 +541,10 @@ Messages with `SimStamp`:
 - `SystemStatePayload`: `28` bytes
 - `TelemetrySnapshotPayload`: `74` bytes
 
+Status payloads without `SimStamp`:
+
+- `ActuatorStatusPayload`: `20` bytes
+
 Command payloads:
 
 - `PingPayload`: `0` bytes
@@ -450,6 +553,13 @@ Command payloads:
 - `ArmPayload`: `0` bytes
 - `DisarmPayload`: `0` bytes
 - `RtlPayload`: `0` bytes
+- `BenchEnablePayload`: `8` bytes
+- `BenchDisablePayload`: `0` bytes
+- `MotorTestPayload`: `12` bytes
+- `MotorSweepPayload`: `16` bytes
+- `MotorStopPayload`: `0` bytes
+- `DshotCommandPayload`: `4` bytes
+- `ActuatorStatusRequestPayload`: `0` bytes
 - `AckPayload`: `4` bytes
 - `NackPayload`: `4` bytes
 - `ControlWaypointPayload`: `40` bytes

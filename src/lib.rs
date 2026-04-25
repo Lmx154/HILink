@@ -61,6 +61,15 @@ pub enum MsgType {
     TofWaypoint = 44,
     MissionWaypoint = 45,
     Rtl = 46,
+
+    BenchEnable = 60,
+    BenchDisable = 61,
+    MotorTest = 62,
+    MotorSweep = 63,
+    MotorStop = 64,
+    DshotCommand = 65,
+    ActuatorStatusRequest = 66,
+    ActuatorStatus = 67,
 }
 
 impl TryFrom<u8> for MsgType {
@@ -93,6 +102,14 @@ impl TryFrom<u8> for MsgType {
             44 => Ok(Self::TofWaypoint),
             45 => Ok(Self::MissionWaypoint),
             46 => Ok(Self::Rtl),
+            60 => Ok(Self::BenchEnable),
+            61 => Ok(Self::BenchDisable),
+            62 => Ok(Self::MotorTest),
+            63 => Ok(Self::MotorSweep),
+            64 => Ok(Self::MotorStop),
+            65 => Ok(Self::DshotCommand),
+            66 => Ok(Self::ActuatorStatusRequest),
+            67 => Ok(Self::ActuatorStatus),
             _ => Err(Error::UnknownMsgType),
         }
     }
@@ -340,6 +357,63 @@ pub struct TelemetrySnapshotPayload {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BenchEnablePayload {
+    pub magic: u32,
+    pub timeout_ms: u16,
+    pub reserved0: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MotorTestPayload {
+    pub motor_mask: u8,
+    pub mode: u8,
+    pub reserved0: [u8; 2],
+    pub value: u16,
+    pub duration_ms: u16,
+    pub ramp_ms: u16,
+    pub reserved1: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MotorSweepPayload {
+    pub motor_mask: u8,
+    pub mode: u8,
+    pub reserved0: [u8; 2],
+    pub start_value: u16,
+    pub end_value: u16,
+    pub step_value: u16,
+    pub step_duration_ms: u16,
+    pub zero_between_ms: u16,
+    pub repeat_count: u8,
+    pub reserved1: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DshotCommandPayload {
+    pub motor_mask: u8,
+    pub command: u8,
+    pub repeat_count: u8,
+    pub reserved0: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ActuatorStatusPayload {
+    pub armed: u8,
+    pub bench_enabled: u8,
+    pub active_motor_mask: u8,
+    pub mode: u8,
+    pub commanded_dshot: [u16; 4],
+    pub last_command_age_ms: u16,
+    pub bench_timeout_ms: u16,
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AckPayload {
     pub acked_seq: u16,
     pub acked_msg_type: u8,
@@ -372,6 +446,15 @@ pub struct RtlPayload;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HilReadyPayload;
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct BenchDisablePayload;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MotorStopPayload;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ActuatorStatusRequestPayload;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodedPacket<'a> {
     pub header: Header,
@@ -400,6 +483,30 @@ pub mod response_flags {
     pub const FAILSAFE: u32 = 1 << 1;
     pub const ESTIMATOR_VALID: u32 = 1 << 2;
     pub const MOTORS_VALID: u32 = 1 << 3;
+}
+
+pub mod bench {
+    pub const ENABLE_MAGIC: u32 = 0x4D4F_544F;
+    pub const MOTOR_MASK_M1: u8 = 1 << 0;
+    pub const MOTOR_MASK_M2: u8 = 1 << 1;
+    pub const MOTOR_MASK_M3: u8 = 1 << 2;
+    pub const MOTOR_MASK_M4: u8 = 1 << 3;
+    pub const MOTOR_MASK_ALL: u8 = MOTOR_MASK_M1 | MOTOR_MASK_M2 | MOTOR_MASK_M3 | MOTOR_MASK_M4;
+    pub const MAX_TEST_DURATION_MS: u16 = 5_000;
+}
+
+pub mod motor_test_mode {
+    pub const STOP: u8 = 0;
+    pub const RAW_DSHOT: u8 = 1;
+    pub const NORMALIZED: u8 = 2;
+}
+
+pub mod actuator_flags {
+    pub const OUTPUT_ACTIVE: u32 = 1 << 0;
+    pub const COMMAND_TIMEOUT: u32 = 1 << 1;
+    pub const CLAMPED: u32 = 1 << 2;
+    pub const REJECTED_WHILE_DISARMED: u32 = 1 << 3;
+    pub const BENCH_MODE_ENABLED: u32 = 1 << 4;
 }
 
 pub trait WirePayload: Sized {
@@ -625,6 +732,9 @@ impl_empty_payload!(HilReadyPayload, MsgType::HilReady);
 impl_empty_payload!(ArmPayload, MsgType::Arm);
 impl_empty_payload!(DisarmPayload, MsgType::Disarm);
 impl_empty_payload!(RtlPayload, MsgType::Rtl);
+impl_empty_payload!(BenchDisablePayload, MsgType::BenchDisable);
+impl_empty_payload!(MotorStopPayload, MsgType::MotorStop);
+impl_empty_payload!(ActuatorStatusRequestPayload, MsgType::ActuatorStatusRequest);
 
 impl WirePayload for ImuPayload {
     const MSG_TYPE: MsgType = MsgType::Imu;
@@ -1059,6 +1169,155 @@ impl WirePayload for TelemetrySnapshotPayload {
     }
 }
 
+impl WirePayload for BenchEnablePayload {
+    const MSG_TYPE: MsgType = MsgType::BenchEnable;
+    const WIRE_LEN: usize = 8;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u32(self.magic)?;
+        w.u16(self.timeout_ms)?;
+        w.bytes(&self.reserved0)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            magic: r.u32()?,
+            timeout_ms: r.u16()?,
+            reserved0: r.bytes2()?,
+        })
+    }
+}
+
+impl WirePayload for MotorTestPayload {
+    const MSG_TYPE: MsgType = MsgType::MotorTest;
+    const WIRE_LEN: usize = 12;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u8(self.motor_mask)?;
+        w.u8(self.mode)?;
+        w.bytes(&self.reserved0)?;
+        w.u16(self.value)?;
+        w.u16(self.duration_ms)?;
+        w.u16(self.ramp_ms)?;
+        w.u16(self.reserved1)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            motor_mask: r.u8()?,
+            mode: r.u8()?,
+            reserved0: r.bytes2()?,
+            value: r.u16()?,
+            duration_ms: r.u16()?,
+            ramp_ms: r.u16()?,
+            reserved1: r.u16()?,
+        })
+    }
+}
+
+impl WirePayload for MotorSweepPayload {
+    const MSG_TYPE: MsgType = MsgType::MotorSweep;
+    const WIRE_LEN: usize = 16;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u8(self.motor_mask)?;
+        w.u8(self.mode)?;
+        w.bytes(&self.reserved0)?;
+        w.u16(self.start_value)?;
+        w.u16(self.end_value)?;
+        w.u16(self.step_value)?;
+        w.u16(self.step_duration_ms)?;
+        w.u16(self.zero_between_ms)?;
+        w.u8(self.repeat_count)?;
+        w.u8(self.reserved1)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            motor_mask: r.u8()?,
+            mode: r.u8()?,
+            reserved0: r.bytes2()?,
+            start_value: r.u16()?,
+            end_value: r.u16()?,
+            step_value: r.u16()?,
+            step_duration_ms: r.u16()?,
+            zero_between_ms: r.u16()?,
+            repeat_count: r.u8()?,
+            reserved1: r.u8()?,
+        })
+    }
+}
+
+impl WirePayload for DshotCommandPayload {
+    const MSG_TYPE: MsgType = MsgType::DshotCommand;
+    const WIRE_LEN: usize = 4;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u8(self.motor_mask)?;
+        w.u8(self.command)?;
+        w.u8(self.repeat_count)?;
+        w.u8(self.reserved0)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            motor_mask: r.u8()?,
+            command: r.u8()?,
+            repeat_count: r.u8()?,
+            reserved0: r.u8()?,
+        })
+    }
+}
+
+impl WirePayload for ActuatorStatusPayload {
+    const MSG_TYPE: MsgType = MsgType::ActuatorStatus;
+    const WIRE_LEN: usize = 20;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u8(self.armed)?;
+        w.u8(self.bench_enabled)?;
+        w.u8(self.active_motor_mask)?;
+        w.u8(self.mode)?;
+        w.u16x4(self.commanded_dshot)?;
+        w.u16(self.last_command_age_ms)?;
+        w.u16(self.bench_timeout_ms)?;
+        w.u32(self.flags)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            armed: r.u8()?,
+            bench_enabled: r.u8()?,
+            active_motor_mask: r.u8()?,
+            mode: r.u8()?,
+            commanded_dshot: r.u16x4()?,
+            last_command_age_ms: r.u16()?,
+            bench_timeout_ms: r.u16()?,
+            flags: r.u32()?,
+        })
+    }
+}
+
 impl WirePayload for AckPayload {
     const MSG_TYPE: MsgType = MsgType::Ack;
     const WIRE_LEN: usize = 4;
@@ -1375,5 +1634,57 @@ mod tests {
         assert_eq!(packet.header.seq, 9);
         assert_eq!(packet.header.send_time_ms, 2222);
         assert_eq!(decoded, ready);
+    }
+
+    #[test]
+    fn motor_test_packet_round_trip() {
+        let test = MotorTestPayload {
+            motor_mask: bench::MOTOR_MASK_M1,
+            mode: motor_test_mode::RAW_DSHOT,
+            reserved0: [0; 2],
+            value: 150,
+            duration_ms: 1_000,
+            ramp_ms: 100,
+            reserved1: 0,
+        };
+
+        let mut raw = [0u8; raw_frame_len(MotorTestPayload::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(MotorTestPayload::WIRE_LEN)];
+        let encoded_len = encode_packet(&test, 10, 3333, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(MotorTestPayload::WIRE_LEN)];
+        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
+        let decoded = decode_payload::<MotorTestPayload>(&packet).unwrap();
+
+        assert_eq!(packet.header.message_type().unwrap(), MsgType::MotorTest);
+        assert_eq!(decoded, test);
+    }
+
+    #[test]
+    fn actuator_status_packet_round_trip() {
+        let status = ActuatorStatusPayload {
+            armed: 1,
+            bench_enabled: 1,
+            active_motor_mask: bench::MOTOR_MASK_ALL,
+            mode: motor_test_mode::RAW_DSHOT,
+            commanded_dshot: [120, 150, 200, 0],
+            last_command_age_ms: 25,
+            bench_timeout_ms: 30_000,
+            flags: actuator_flags::OUTPUT_ACTIVE | actuator_flags::BENCH_MODE_ENABLED,
+        };
+
+        let mut raw = [0u8; raw_frame_len(ActuatorStatusPayload::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(ActuatorStatusPayload::WIRE_LEN)];
+        let encoded_len = encode_packet(&status, 11, 4444, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(ActuatorStatusPayload::WIRE_LEN)];
+        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
+        let decoded = decode_payload::<ActuatorStatusPayload>(&packet).unwrap();
+
+        assert_eq!(
+            packet.header.message_type().unwrap(),
+            MsgType::ActuatorStatus
+        );
+        assert_eq!(decoded, status);
     }
 }
