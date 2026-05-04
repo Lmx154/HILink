@@ -228,6 +228,20 @@ pub enum MsgType {
     DshotCommand = 65,
     ActuatorStatusRequest = 66,
     ActuatorStatus = 67,
+
+    LoRaHeartbeat = 80,
+    LoRaFlightSnapshot = 81,
+    LoRaNavSnapshot = 82,
+    LoRaGpsSnapshot = 83,
+    LoRaPowerSnapshot = 84,
+    LoRaEvent = 85,
+    LoRaFaults = 86,
+    LoRaLinkStatus = 87,
+
+    LoRaCommand = 100,
+    LoRaCommandAck = 101,
+    LoRaSetProfile = 102,
+    LoRaRequestSnapshot = 103,
 }
 ```
 
@@ -260,6 +274,16 @@ Command/control messages:
 Bench telemetry messages:
 
 - `ActuatorStatus`
+
+LoRa flight radio messages:
+
+- `LoRaFlightSnapshot`: compact 10 Hz flight state
+- `LoRaGpsSnapshot`: compact GPS state, usually 1-2 Hz
+- `LoRaLinkStatus`: radio/link health, usually 1 Hz
+- `LoRaEvent` / `LoRaFaults`: immediate event and fault reporting
+- `LoRaCommand` / `LoRaCommandAck`: compact command envelope and ACK
+- `LoRaHeartbeat`, `LoRaNavSnapshot`, `LoRaPowerSnapshot`,
+  `LoRaSetProfile`, and `LoRaRequestSnapshot`: lower-rate support messages
 
 ## Bench Actuator Commands
 
@@ -544,6 +568,14 @@ Messages with `SimStamp`:
 Status payloads without `SimStamp`:
 
 - `ActuatorStatusPayload`: `20` bytes
+- `LoRaHeartbeatPayload`: `12` bytes
+- `LoRaFlightSnapshotPayload`: `22` bytes
+- `LoRaNavSnapshotPayload`: `18` bytes
+- `LoRaGpsSnapshotPayload`: `22` bytes
+- `LoRaPowerSnapshotPayload`: `12` bytes
+- `LoRaEventPayload`: `15` bytes
+- `LoRaFaultsPayload`: `14` bytes
+- `LoRaLinkStatusPayload`: `18` bytes
 
 Command payloads:
 
@@ -560,6 +592,10 @@ Command payloads:
 - `MotorStopPayload`: `0` bytes
 - `DshotCommandPayload`: `4` bytes
 - `ActuatorStatusRequestPayload`: `0` bytes
+- `LoRaCommandPayload`: `16` bytes
+- `LoRaCommandAckPayload`: `12` bytes
+- `LoRaSetProfilePayload`: `8` bytes
+- `LoRaRequestSnapshotPayload`: `4` bytes
 - `AckPayload`: `4` bytes
 - `NackPayload`: `4` bytes
 - `ControlWaypointPayload`: `40` bytes
@@ -570,6 +606,113 @@ Command payloads:
 Waypoint messages include `ref_stamp: SimStamp`. This does not require the FC to
 wait until that tick. It records the simulation context in which the command was
 generated.
+
+## LoRa Flight Radio Profile
+
+The LoRa dialect is optimized around small semantic packets rather than raw
+sensor or estimator frames. A complete HILink packet still carries the normal
+12-byte HILink header, 2-byte CRC, and COBS delimiter, so the LoRa payloads stay
+small: normally 12-28 bytes.
+
+Core telemetry:
+
+```text
+LoRaFlightSnapshotPayload, 22 bytes
+time_ms: u32
+state: u8
+mode: u8
+flags: u16
+altitude_dm: i32
+vertical_velocity_cms: i16
+accel_mag_cms2: u16
+battery_mv: u16
+pyro_or_actuator_flags: u16
+fault_summary: u16
+```
+
+GPS is separate and lower-rate:
+
+```text
+LoRaGpsSnapshotPayload, 22 bytes
+time_ms: u32
+lat_e7: i32
+lon_e7: i32
+alt_msl_dm: i32
+ground_speed_cms: u16
+heading_cdeg: u16
+sats: u8
+fix_type: u8
+```
+
+Link health:
+
+```text
+LoRaLinkStatusPayload, 18 bytes
+time_ms: u32
+uplink_rssi_dbm: i8
+uplink_snr_x4: i8
+downlink_rssi_dbm: i8
+downlink_snr_x4: i8
+rx_packets_delta: u16
+tx_packets_delta: u16
+lost_packets_delta: u16
+active_profile: u8
+telemetry_rate_hz: u8
+reserved: u16
+```
+
+Events, faults, and commands:
+
+```text
+LoRaEventPayload, 15 bytes
+time_ms: u32
+event_id: u16
+severity: u8
+arg0: i32
+arg1: i32
+
+LoRaFaultsPayload, 14 bytes
+time_ms: u32
+active_faults: u32
+latched_faults: u32
+inhibit_flags: u16
+
+LoRaCommandPayload, 16 bytes
+command_id: u16
+command_seq: u16
+expires_ms: u16
+flags: u16
+arg0: i32
+arg1: i32
+
+LoRaCommandAckPayload, 12 bytes
+command_id: u16
+command_seq: u16
+status: u8
+reason: u8
+state: u8
+reserved: u8
+detail: i32
+```
+
+Command IDs live in `lora_command_id` and include `ARM`, `DISARM`, `ABORT`,
+`MOTOR_STOP`, `SET_MODE`, `SET_TELEMETRY_RATE`, `SET_RADIO_PROFILE`,
+`REQUEST_SNAPSHOT`, `REQUEST_GPS`, `REQUEST_FAULTS`,
+`ENTER_RECOVERY_BEACON`, and `PING`.
+
+ACK statuses live in `lora_command_status`: `ACCEPTED`, `REJECTED`,
+`DENIED_STATE`, `DENIED_SAFETY`, `INVALID_ARG`, `EXPIRED`,
+`DUPLICATE_ACCEPTED`, `DUPLICATE_REJECTED`, and `BUSY`.
+
+Recommended scheduling:
+
+- SF7/500 kHz: 10 Hz `LoRaFlightSnapshot`, 1-2 Hz `LoRaGpsSnapshot`, 1 Hz
+  `LoRaLinkStatus`, immediate events/faults/command ACKs
+- SF8/500 kHz: 5-10 Hz flight snapshots, 1 Hz GPS, 1 Hz link status, commands
+  preempt telemetry
+- SF8/250 kHz fallback: 5 Hz flight snapshots, 0.5-1 Hz GPS, 1 Hz link status
+  or folded heartbeat
+- Recovery beacon: 1 Hz or lower, flight and GPS alternating, debug disabled
 
 ## Encoding Packets
 

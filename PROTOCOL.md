@@ -54,6 +54,18 @@ Header length: 12 bytes.
 | 65 | DshotCommand | DshotCommandPayload | host -> FC |
 | 66 | ActuatorStatusRequest | ActuatorStatusRequestPayload | host -> FC |
 | 67 | ActuatorStatus | ActuatorStatusPayload | FC -> host |
+| 80 | LoRaHeartbeat | LoRaHeartbeatPayload | FC -> GS |
+| 81 | LoRaFlightSnapshot | LoRaFlightSnapshotPayload | FC -> GS |
+| 82 | LoRaNavSnapshot | LoRaNavSnapshotPayload | FC -> GS |
+| 83 | LoRaGpsSnapshot | LoRaGpsSnapshotPayload | FC -> GS |
+| 84 | LoRaPowerSnapshot | LoRaPowerSnapshotPayload | FC -> GS |
+| 85 | LoRaEvent | LoRaEventPayload | FC -> GS |
+| 86 | LoRaFaults | LoRaFaultsPayload | FC -> GS |
+| 87 | LoRaLinkStatus | LoRaLinkStatusPayload | FC -> GS |
+| 100 | LoRaCommand | LoRaCommandPayload | GS -> FC |
+| 101 | LoRaCommandAck | LoRaCommandAckPayload | FC -> GS |
+| 102 | LoRaSetProfile | LoRaSetProfilePayload | GS -> FC |
+| 103 | LoRaRequestSnapshot | LoRaRequestSnapshotPayload | GS -> FC |
 
 ## Payload Sizes
 
@@ -69,12 +81,24 @@ Header length: 12 bytes.
 | MotorStopPayload | 0 |
 | ActuatorStatusRequestPayload | 0 |
 | AckPayload | 4 |
+| LoRaRequestSnapshotPayload | 4 |
 | NackPayload | 4 |
 | DshotCommandPayload | 4 |
 | BenchEnablePayload | 8 |
+| LoRaSetProfilePayload | 8 |
+| LoRaCommandAckPayload | 12 |
+| LoRaHeartbeatPayload | 12 |
+| LoRaPowerSnapshotPayload | 12 |
 | MotorTestPayload | 12 |
+| LoRaFaultsPayload | 14 |
+| LoRaEventPayload | 15 |
 | MotorSweepPayload | 16 |
+| LoRaCommandPayload | 16 |
+| LoRaLinkStatusPayload | 18 |
+| LoRaNavSnapshotPayload | 18 |
 | ActuatorStatusPayload | 20 |
+| LoRaFlightSnapshotPayload | 22 |
+| LoRaGpsSnapshotPayload | 22 |
 | HeartbeatPayload | 24 |
 | MotorStatePayload | 24 |
 | BaroPayload | 28 |
@@ -156,6 +180,148 @@ Header length: 12 bytes.
 | MagPayload | stamp: SimStamp, mag_ut: [f32; 3] |
 | BaroPayload | stamp: SimStamp, pressure_pa: f32, altitude_m: f32, temperature_c: f32 |
 | GpsPayload | stamp: SimStamp, lat_deg: f64, lon_deg: f64, alt_msl_m: f32, vel_ned_mps: [f32; 3], sats: u8, fix_type: u8, reserved: [u8; 2] |
+
+## LoRa Payloads
+
+LoRa messages are compact semantic packets intended for the flight radio link.
+Use the existing high-bandwidth HIL and component messages for USB, simulation,
+tests, and bench work.
+
+### LoRaFlightSnapshotPayload, 22 bytes
+
+| Offset | Field | Type | Bytes |
+| ---: | --- | --- | ---: |
+| 0 | time_ms | u32 | 4 |
+| 4 | state | u8 | 1 |
+| 5 | mode | u8 | 1 |
+| 6 | flags | u16 | 2 |
+| 8 | altitude_dm | i32 | 4 |
+| 12 | vertical_velocity_cms | i16 | 2 |
+| 14 | accel_mag_cms2 | u16 | 2 |
+| 16 | battery_mv | u16 | 2 |
+| 18 | pyro_or_actuator_flags | u16 | 2 |
+| 20 | fault_summary | u16 | 2 |
+
+### LoRaGpsSnapshotPayload, 22 bytes
+
+| Offset | Field | Type | Bytes |
+| ---: | --- | --- | ---: |
+| 0 | time_ms | u32 | 4 |
+| 4 | lat_e7 | i32 | 4 |
+| 8 | lon_e7 | i32 | 4 |
+| 12 | alt_msl_dm | i32 | 4 |
+| 16 | ground_speed_cms | u16 | 2 |
+| 18 | heading_cdeg | u16 | 2 |
+| 20 | sats | u8 | 1 |
+| 21 | fix_type | u8 | 1 |
+
+### LoRaLinkStatusPayload, 18 bytes
+
+| Offset | Field | Type | Bytes |
+| ---: | --- | --- | ---: |
+| 0 | time_ms | u32 | 4 |
+| 4 | uplink_rssi_dbm | i8 | 1 |
+| 5 | uplink_snr_x4 | i8 | 1 |
+| 6 | downlink_rssi_dbm | i8 | 1 |
+| 7 | downlink_snr_x4 | i8 | 1 |
+| 8 | rx_packets_delta | u16 | 2 |
+| 10 | tx_packets_delta | u16 | 2 |
+| 12 | lost_packets_delta | u16 | 2 |
+| 14 | active_profile | u8 | 1 |
+| 15 | telemetry_rate_hz | u8 | 1 |
+| 16 | reserved | u16 | 2 |
+
+### LoRaEventPayload, 15 bytes
+
+| Offset | Field | Type | Bytes |
+| ---: | --- | --- | ---: |
+| 0 | time_ms | u32 | 4 |
+| 4 | event_id | u16 | 2 |
+| 6 | severity | u8 | 1 |
+| 7 | arg0 | i32 | 4 |
+| 11 | arg1 | i32 | 4 |
+
+### LoRaFaultsPayload, 14 bytes
+
+| Offset | Field | Type | Bytes |
+| ---: | --- | --- | ---: |
+| 0 | time_ms | u32 | 4 |
+| 4 | active_faults | u32 | 4 |
+| 8 | latched_faults | u32 | 4 |
+| 12 | inhibit_flags | u16 | 2 |
+
+### LoRaCommandPayload, 16 bytes
+
+| Offset | Field | Type | Bytes |
+| ---: | --- | --- | ---: |
+| 0 | command_id | u16 | 2 |
+| 2 | command_seq | u16 | 2 |
+| 4 | expires_ms | u16 | 2 |
+| 6 | flags | u16 | 2 |
+| 8 | arg0 | i32 | 4 |
+| 12 | arg1 | i32 | 4 |
+
+### LoRaCommandAckPayload, 12 bytes
+
+| Offset | Field | Type | Bytes |
+| ---: | --- | --- | ---: |
+| 0 | command_id | u16 | 2 |
+| 2 | command_seq | u16 | 2 |
+| 4 | status | u8 | 1 |
+| 5 | reason | u8 | 1 |
+| 6 | state | u8 | 1 |
+| 7 | reserved | u8 | 1 |
+| 8 | detail | i32 | 4 |
+
+Other LoRa payloads:
+
+| Payload | Fields |
+| --- | --- |
+| LoRaHeartbeatPayload | time_ms: u32, state: u8, mode: u8, flags: u16, battery_mv: u16, fault_summary: u16 |
+| LoRaNavSnapshotPayload | time_ms: u32, altitude_dm: i32, vertical_velocity_cms: i16, ground_speed_cms: u16, heading_cdeg: u16, accel_mag_cms2: u16, nav_flags: u16 |
+| LoRaPowerSnapshotPayload | time_ms: u32, battery_mv: u16, battery_ma: i16, consumed_mah: u16, battery_pct: u8, flags: u8 |
+| LoRaSetProfilePayload | command_seq: u16, profile: u8, telemetry_rate_hz: u8, gps_rate_hz: u8, link_status_rate_hz: u8, flags: u16 |
+| LoRaRequestSnapshotPayload | command_seq: u16, request_flags: u16 |
+
+Recommended scheduling:
+
+| Profile | Schedule |
+| --- | --- |
+| SF7/500 kHz | 10 Hz flight snapshots, 1-2 Hz GPS, 1 Hz link status, immediate events/faults/ACKs |
+| SF8/500 kHz | 5-10 Hz flight snapshots, 1 Hz GPS, 1 Hz link status, commands preempt telemetry |
+| SF8/250 kHz fallback | 5 Hz flight snapshots, 0.5-1 Hz GPS, 1 Hz link status or folded heartbeat |
+| Recovery beacon | 1 Hz or lower, flight and GPS alternating, debug disabled |
+
+LoRa command IDs:
+
+| Name | Value |
+| --- | ---: |
+| lora_command_id::ARM | 1 |
+| lora_command_id::DISARM | 2 |
+| lora_command_id::ABORT | 3 |
+| lora_command_id::MOTOR_STOP | 4 |
+| lora_command_id::SET_MODE | 5 |
+| lora_command_id::SET_TELEMETRY_RATE | 6 |
+| lora_command_id::SET_RADIO_PROFILE | 7 |
+| lora_command_id::REQUEST_SNAPSHOT | 8 |
+| lora_command_id::REQUEST_GPS | 9 |
+| lora_command_id::REQUEST_FAULTS | 10 |
+| lora_command_id::ENTER_RECOVERY_BEACON | 11 |
+| lora_command_id::PING | 12 |
+
+LoRa command statuses:
+
+| Name | Value |
+| --- | ---: |
+| lora_command_status::ACCEPTED | 0 |
+| lora_command_status::REJECTED | 1 |
+| lora_command_status::DENIED_STATE | 2 |
+| lora_command_status::DENIED_SAFETY | 3 |
+| lora_command_status::INVALID_ARG | 4 |
+| lora_command_status::EXPIRED | 5 |
+| lora_command_status::DUPLICATE_ACCEPTED | 6 |
+| lora_command_status::DUPLICATE_REJECTED | 7 |
+| lora_command_status::BUSY | 8 |
 
 ### Waypoint Payloads
 
