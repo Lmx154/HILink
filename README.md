@@ -229,11 +229,8 @@ pub enum MsgType {
     ActuatorStatusRequest = 66,
     ActuatorStatus = 67,
 
-    LoRaHeartbeat = 80,
     LoRaFlightSnapshot = 81,
-    LoRaNavSnapshot = 82,
     LoRaGpsSnapshot = 83,
-    LoRaPowerSnapshot = 84,
     LoRaEvent = 85,
     LoRaFaults = 86,
     LoRaLinkStatus = 87,
@@ -282,8 +279,8 @@ LoRa flight radio messages:
 - `LoRaLinkStatus`: radio/link health, usually 1 Hz
 - `LoRaEvent` / `LoRaFaults`: immediate event and fault reporting
 - `LoRaCommand` / `LoRaCommandAck`: compact command envelope and ACK
-- `LoRaHeartbeat`, `LoRaNavSnapshot`, `LoRaPowerSnapshot`,
-  `LoRaSetProfile`, and `LoRaRequestSnapshot`: lower-rate support messages
+- `LoRaSetProfile` and `LoRaRequestSnapshot`: strongly typed radio-management
+  commands
 
 ## Bench Actuator Commands
 
@@ -568,11 +565,8 @@ Messages with `SimStamp`:
 Status payloads without `SimStamp`:
 
 - `ActuatorStatusPayload`: `20` bytes
-- `LoRaHeartbeatPayload`: `12` bytes
 - `LoRaFlightSnapshotPayload`: `22` bytes
-- `LoRaNavSnapshotPayload`: `18` bytes
 - `LoRaGpsSnapshotPayload`: `22` bytes
-- `LoRaPowerSnapshotPayload`: `12` bytes
 - `LoRaEventPayload`: `15` bytes
 - `LoRaFaultsPayload`: `14` bytes
 - `LoRaLinkStatusPayload`: `18` bytes
@@ -613,6 +607,23 @@ The LoRa dialect is optimized around small semantic packets rather than raw
 sensor or estimator frames. A complete HILink packet still carries the normal
 12-byte HILink header, 2-byte CRC, and COBS delimiter, so the LoRa payloads stay
 small: normally 12-28 bytes.
+
+The first-version active LoRa messages are:
+
+```text
+LoRaFlightSnapshot
+LoRaGpsSnapshot
+LoRaLinkStatus
+LoRaEvent
+LoRaFaults
+LoRaCommand
+LoRaCommandAck
+LoRaSetProfile
+LoRaRequestSnapshot
+```
+
+`LoRaHeartbeat`, `LoRaNavSnapshot`, and `LoRaPowerSnapshot` are intentionally
+left out of V1. `LoRaFlightSnapshot` already carries the heartbeat-level fields.
 
 Core telemetry:
 
@@ -713,6 +724,192 @@ Recommended scheduling:
 - SF8/250 kHz fallback: 5 Hz flight snapshots, 0.5-1 Hz GPS, 1 Hz link status
   or folded heartbeat
 - Recovery beacon: 1 Hz or lower, flight and GPS alternating, debug disabled
+
+### LoRa Field Meanings
+
+State values live in `lora_state`:
+
+| Name | Value |
+| --- | ---: |
+| UNKNOWN | 0 |
+| BOOT | 1 |
+| STANDBY | 2 |
+| ARMED | 3 |
+| ASCENT | 4 |
+| COAST | 5 |
+| DESCENT | 6 |
+| LANDED | 7 |
+| ABORT | 8 |
+| FAILSAFE | 9 |
+
+Mode values live in `lora_mode`:
+
+| Name | Value |
+| --- | ---: |
+| UNKNOWN | 0 |
+| MANUAL | 1 |
+| AUTO | 2 |
+| GUIDED | 3 |
+| HIL | 4 |
+| RECOVERY | 5 |
+
+`LoRaFlightSnapshotPayload.flags` uses `lora_flags`:
+
+| Flag | Bit |
+| --- | ---: |
+| ARMED | 0 |
+| FAILSAFE | 1 |
+| GPS_VALID | 2 |
+| ESTIMATOR_VALID | 3 |
+| BATTERY_LOW | 4 |
+| PYRO_SAFE | 5 |
+| RADIO_DEGRADED | 6 |
+| RECOVERY_ACTIVE | 7 |
+
+`pyro_or_actuator_flags` uses `lora_pyro_actuator_flags`:
+
+| Flag | Bit |
+| --- | ---: |
+| MOTOR_OUTPUT_ACTIVE | 0 |
+| MOTOR_OUTPUT_CLAMPED | 1 |
+| PYRO_CONTINUITY_1 | 2 |
+| PYRO_CONTINUITY_2 | 3 |
+| PYRO_FIRED_1 | 4 |
+| PYRO_FIRED_2 | 5 |
+| PYRO_INHIBITED | 6 |
+
+`fault_summary` is the low 16-bit summary of `lora_fault`:
+
+| Fault | Bit |
+| --- | ---: |
+| IMU | 0 |
+| MAG | 1 |
+| BARO | 2 |
+| GPS | 3 |
+| ESTIMATOR | 4 |
+| BATTERY | 5 |
+| RADIO | 6 |
+| STORAGE | 7 |
+| ACTUATOR | 8 |
+| PYRO | 9 |
+| SAFETY_INHIBIT | 10 |
+
+`LoRaEventPayload.event_id` uses `lora_event_id`, and `severity` uses
+`lora_event_severity`:
+
+| Event | Value |
+| --- | ---: |
+| BOOT | 1 |
+| STATE_CHANGE | 2 |
+| MODE_CHANGE | 3 |
+| ARM_ACCEPTED | 4 |
+| DISARMED | 5 |
+| ABORT_TRIGGERED | 6 |
+| GPS_FIX_CHANGED | 7 |
+| RADIO_PROFILE_CHANGED | 8 |
+| FAULT_ASSERTED | 9 |
+| FAULT_CLEARED | 10 |
+| PYRO_FIRED | 11 |
+| RECOVERY_BEACON_ENTERED | 12 |
+
+| Severity | Value |
+| --- | ---: |
+| INFO | 0 |
+| WARNING | 1 |
+| ERROR | 2 |
+| CRITICAL | 3 |
+
+`LoRaCommandPayload.flags` uses `lora_command_flags`:
+
+| Flag | Bit |
+| --- | ---: |
+| URGENT | 0 |
+| REQUIRE_ARMED | 1 |
+| ALLOW_WHILE_FAILSAFE | 2 |
+| QUEUE_IF_BUSY | 3 |
+
+`LoRaCommandAckPayload.reason` uses `lora_command_reason`: `NONE`, `BAD_STATE`,
+`SAFETY_INHIBIT`, `AUTH_REQUIRED`, `UNSUPPORTED`, `BAD_ARGUMENT`, `EXPIRED`,
+`DUPLICATE`, and `RADIO_BUSY`.
+
+`LoRaSetProfilePayload.flags` uses `lora_profile_flags`:
+
+| Flag | Bit |
+| --- | ---: |
+| TEMPORARY | 0 |
+| SAVE_DEFAULT | 1 |
+| ENTER_RECOVERY_RX_WINDOWS | 2 |
+
+### LoRa Scaling And Saturation
+
+- `time_ms` is sender-local monotonic milliseconds and may wrap.
+- `altitude_dm` in `LoRaFlightSnapshotPayload` is AGL in decimeters. Saturate to
+  `i32::MIN + 1..=i32::MAX`; reserve `i32::MIN` as invalid.
+- `alt_msl_dm` in `LoRaGpsSnapshotPayload` is MSL altitude in decimeters.
+  Reserve `i32::MIN` as invalid.
+- `vertical_velocity_cms` is positive upward. Saturate to `i16::MIN..=i16::MAX`.
+- `lat_e7` and `lon_e7` are WGS84 degrees scaled by `1e7`; use
+  `lora_scaling::LAT_LON_INVALID_E7` (`i32::MIN`) when GPS is invalid.
+- `heading_cdeg` is centidegrees clockwise from true north; use `u16::MAX` when
+  invalid.
+- `sats = 0`, `fix_type = 0`, invalid lat/lon, and `GPS_VALID` clear all mean
+  no usable GPS fix.
+- RSSI values are signed dBm and should be clamped to `-127..=20`.
+- SNR values are quarter-dB units and should be clamped to `-80..=80`
+  (`-20.0..=20.0 dB`).
+- `battery_mv`, speeds, and acceleration magnitudes are unsigned saturated
+  integers.
+
+Odd-sized LoRa payloads are intentional. Do not serialize `repr(C)` struct
+memory directly; the crate's field-by-field encoder is the wire contract.
+
+### LoRa Link Ownership
+
+`LoRaLinkStatus` is owned by the radio or GS bridge. The bridge may emit it
+directly as HILink telemetry, or it may forward radio metadata to the FC and let
+the FC emit the packet. The important rule is that the source of uplink and
+downlink RSSI/SNR must be explicit in the bridge implementation.
+
+### LoRa Command Policy
+
+Use `LoRaCommand` for safety and mission commands: arm, disarm, abort, motor
+stop, mode changes, ping, and recovery beacon entry.
+
+Use `LoRaSetProfile` and `LoRaRequestSnapshot` for common radio-management
+commands because they are compact and strongly typed. They still use
+`command_seq` and must receive `LoRaCommandAck`.
+
+`command_seq` is per ground-station sender and monotonic modulo `u16`.
+Receivers keep a duplicate-result cache per sender. V1 cache depth is 16 command
+results or 30 seconds, whichever expires first. Duplicate commands return
+`DUPLICATE_ACCEPTED` or `DUPLICATE_REJECTED` with the original `reason` and
+`detail`.
+
+ACK timeout and retry defaults:
+
+| Profile | ACK timeout | Max retries |
+| --- | ---: | ---: |
+| SF7/500 kHz | 250 ms | 3 |
+| SF8/500 kHz | 400 ms | 3 |
+| SF8/250 kHz fallback | 750 ms | 4 |
+| Recovery beacon | 2000 ms | 2 |
+
+### LoRa Scheduler
+
+Outbound LoRa frames are scheduled by priority:
+
+| Priority | Traffic |
+| ---: | --- |
+| P0 | abort, motor stop, disarm |
+| P1 | command ACK/NACK |
+| P2 | faults and events |
+| P3 | flight snapshot |
+| P4 | GPS and link status |
+| P5 | requested debug |
+
+Commands preempt telemetry. Stale telemetry is droppable; stale commands are
+not. A queued flight snapshot is stale once a newer flight snapshot is available.
+GPS and link status packets are stale after one period for the active profile.
 
 ## Encoding Packets
 

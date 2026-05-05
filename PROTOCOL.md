@@ -54,18 +54,15 @@ Header length: 12 bytes.
 | 65 | DshotCommand | DshotCommandPayload | host -> FC |
 | 66 | ActuatorStatusRequest | ActuatorStatusRequestPayload | host -> FC |
 | 67 | ActuatorStatus | ActuatorStatusPayload | FC -> host |
-| 80 | LoRaHeartbeat | LoRaHeartbeatPayload | FC -> GS |
 | 81 | LoRaFlightSnapshot | LoRaFlightSnapshotPayload | FC -> GS |
-| 82 | LoRaNavSnapshot | LoRaNavSnapshotPayload | FC -> GS |
 | 83 | LoRaGpsSnapshot | LoRaGpsSnapshotPayload | FC -> GS |
-| 84 | LoRaPowerSnapshot | LoRaPowerSnapshotPayload | FC -> GS |
 | 85 | LoRaEvent | LoRaEventPayload | FC -> GS |
 | 86 | LoRaFaults | LoRaFaultsPayload | FC -> GS |
-| 87 | LoRaLinkStatus | LoRaLinkStatusPayload | FC -> GS |
+| 87 | LoRaLinkStatus | LoRaLinkStatusPayload | bridge/FC -> GS |
 | 100 | LoRaCommand | LoRaCommandPayload | GS -> FC |
 | 101 | LoRaCommandAck | LoRaCommandAckPayload | FC -> GS |
-| 102 | LoRaSetProfile | LoRaSetProfilePayload | GS -> FC |
-| 103 | LoRaRequestSnapshot | LoRaRequestSnapshotPayload | GS -> FC |
+| 102 | LoRaSetProfile | LoRaSetProfilePayload | GS -> bridge/FC |
+| 103 | LoRaRequestSnapshot | LoRaRequestSnapshotPayload | GS -> bridge/FC |
 
 ## Payload Sizes
 
@@ -87,15 +84,12 @@ Header length: 12 bytes.
 | BenchEnablePayload | 8 |
 | LoRaSetProfilePayload | 8 |
 | LoRaCommandAckPayload | 12 |
-| LoRaHeartbeatPayload | 12 |
-| LoRaPowerSnapshotPayload | 12 |
 | MotorTestPayload | 12 |
 | LoRaFaultsPayload | 14 |
 | LoRaEventPayload | 15 |
 | MotorSweepPayload | 16 |
 | LoRaCommandPayload | 16 |
 | LoRaLinkStatusPayload | 18 |
-| LoRaNavSnapshotPayload | 18 |
 | ActuatorStatusPayload | 20 |
 | LoRaFlightSnapshotPayload | 22 |
 | LoRaGpsSnapshotPayload | 22 |
@@ -187,6 +181,10 @@ LoRa messages are compact semantic packets intended for the flight radio link.
 Use the existing high-bandwidth HIL and component messages for USB, simulation,
 tests, and bench work.
 
+V1 active messages are `LoRaFlightSnapshot`, `LoRaGpsSnapshot`,
+`LoRaLinkStatus`, `LoRaEvent`, `LoRaFaults`, `LoRaCommand`,
+`LoRaCommandAck`, `LoRaSetProfile`, and `LoRaRequestSnapshot`.
+
 ### LoRaFlightSnapshotPayload, 22 bytes
 
 | Offset | Field | Type | Bytes |
@@ -277,9 +275,6 @@ Other LoRa payloads:
 
 | Payload | Fields |
 | --- | --- |
-| LoRaHeartbeatPayload | time_ms: u32, state: u8, mode: u8, flags: u16, battery_mv: u16, fault_summary: u16 |
-| LoRaNavSnapshotPayload | time_ms: u32, altitude_dm: i32, vertical_velocity_cms: i16, ground_speed_cms: u16, heading_cdeg: u16, accel_mag_cms2: u16, nav_flags: u16 |
-| LoRaPowerSnapshotPayload | time_ms: u32, battery_mv: u16, battery_ma: i16, consumed_mah: u16, battery_pct: u8, flags: u8 |
 | LoRaSetProfilePayload | command_seq: u16, profile: u8, telemetry_rate_hz: u8, gps_rate_hz: u8, link_status_rate_hz: u8, flags: u16 |
 | LoRaRequestSnapshotPayload | command_seq: u16, request_flags: u16 |
 
@@ -322,6 +317,184 @@ LoRa command statuses:
 | lora_command_status::DUPLICATE_ACCEPTED | 6 |
 | lora_command_status::DUPLICATE_REJECTED | 7 |
 | lora_command_status::BUSY | 8 |
+
+### LoRa Field Constants
+
+State values:
+
+| Name | Value |
+| --- | ---: |
+| lora_state::UNKNOWN | 0 |
+| lora_state::BOOT | 1 |
+| lora_state::STANDBY | 2 |
+| lora_state::ARMED | 3 |
+| lora_state::ASCENT | 4 |
+| lora_state::COAST | 5 |
+| lora_state::DESCENT | 6 |
+| lora_state::LANDED | 7 |
+| lora_state::ABORT | 8 |
+| lora_state::FAILSAFE | 9 |
+
+Mode values:
+
+| Name | Value |
+| --- | ---: |
+| lora_mode::UNKNOWN | 0 |
+| lora_mode::MANUAL | 1 |
+| lora_mode::AUTO | 2 |
+| lora_mode::GUIDED | 3 |
+| lora_mode::HIL | 4 |
+| lora_mode::RECOVERY | 5 |
+
+Flight flags:
+
+| Name | Bit |
+| --- | ---: |
+| lora_flags::ARMED | 0 |
+| lora_flags::FAILSAFE | 1 |
+| lora_flags::GPS_VALID | 2 |
+| lora_flags::ESTIMATOR_VALID | 3 |
+| lora_flags::BATTERY_LOW | 4 |
+| lora_flags::PYRO_SAFE | 5 |
+| lora_flags::RADIO_DEGRADED | 6 |
+| lora_flags::RECOVERY_ACTIVE | 7 |
+
+Fault bits used by `LoRaFaultsPayload.active_faults`,
+`LoRaFaultsPayload.latched_faults`, and the low 16-bit `fault_summary`:
+
+| Name | Bit |
+| --- | ---: |
+| lora_fault::IMU | 0 |
+| lora_fault::MAG | 1 |
+| lora_fault::BARO | 2 |
+| lora_fault::GPS | 3 |
+| lora_fault::ESTIMATOR | 4 |
+| lora_fault::BATTERY | 5 |
+| lora_fault::RADIO | 6 |
+| lora_fault::STORAGE | 7 |
+| lora_fault::ACTUATOR | 8 |
+| lora_fault::PYRO | 9 |
+| lora_fault::SAFETY_INHIBIT | 10 |
+
+Pyro/actuator flags:
+
+| Name | Bit |
+| --- | ---: |
+| lora_pyro_actuator_flags::MOTOR_OUTPUT_ACTIVE | 0 |
+| lora_pyro_actuator_flags::MOTOR_OUTPUT_CLAMPED | 1 |
+| lora_pyro_actuator_flags::PYRO_CONTINUITY_1 | 2 |
+| lora_pyro_actuator_flags::PYRO_CONTINUITY_2 | 3 |
+| lora_pyro_actuator_flags::PYRO_FIRED_1 | 4 |
+| lora_pyro_actuator_flags::PYRO_FIRED_2 | 5 |
+| lora_pyro_actuator_flags::PYRO_INHIBITED | 6 |
+
+Event IDs:
+
+| Name | Value |
+| --- | ---: |
+| lora_event_id::BOOT | 1 |
+| lora_event_id::STATE_CHANGE | 2 |
+| lora_event_id::MODE_CHANGE | 3 |
+| lora_event_id::ARM_ACCEPTED | 4 |
+| lora_event_id::DISARMED | 5 |
+| lora_event_id::ABORT_TRIGGERED | 6 |
+| lora_event_id::GPS_FIX_CHANGED | 7 |
+| lora_event_id::RADIO_PROFILE_CHANGED | 8 |
+| lora_event_id::FAULT_ASSERTED | 9 |
+| lora_event_id::FAULT_CLEARED | 10 |
+| lora_event_id::PYRO_FIRED | 11 |
+| lora_event_id::RECOVERY_BEACON_ENTERED | 12 |
+
+Event severities:
+
+| Name | Value |
+| --- | ---: |
+| lora_event_severity::INFO | 0 |
+| lora_event_severity::WARNING | 1 |
+| lora_event_severity::ERROR | 2 |
+| lora_event_severity::CRITICAL | 3 |
+
+Command flags:
+
+| Name | Bit |
+| --- | ---: |
+| lora_command_flags::URGENT | 0 |
+| lora_command_flags::REQUIRE_ARMED | 1 |
+| lora_command_flags::ALLOW_WHILE_FAILSAFE | 2 |
+| lora_command_flags::QUEUE_IF_BUSY | 3 |
+
+Command ACK reasons:
+
+| Name | Value |
+| --- | ---: |
+| lora_command_reason::NONE | 0 |
+| lora_command_reason::BAD_STATE | 1 |
+| lora_command_reason::SAFETY_INHIBIT | 2 |
+| lora_command_reason::AUTH_REQUIRED | 3 |
+| lora_command_reason::UNSUPPORTED | 4 |
+| lora_command_reason::BAD_ARGUMENT | 5 |
+| lora_command_reason::EXPIRED | 6 |
+| lora_command_reason::DUPLICATE | 7 |
+| lora_command_reason::RADIO_BUSY | 8 |
+
+Profile flags:
+
+| Name | Bit |
+| --- | ---: |
+| lora_profile_flags::TEMPORARY | 0 |
+| lora_profile_flags::SAVE_DEFAULT | 1 |
+| lora_profile_flags::ENTER_RECOVERY_RX_WINDOWS | 2 |
+
+### LoRa Scaling And Scheduling
+
+Scaling rules:
+
+| Field | Rule |
+| --- | --- |
+| time_ms | sender-local monotonic milliseconds, wrap allowed |
+| altitude_dm | AGL decimeters, `i32::MIN` invalid, otherwise saturate to `i32::MIN + 1..=i32::MAX` |
+| alt_msl_dm | MSL decimeters, `i32::MIN` invalid |
+| vertical_velocity_cms | centimeters/second, positive upward, saturating `i16` |
+| lat_e7/lon_e7 | WGS84 degrees times `1e7`, `i32::MIN` invalid |
+| heading_cdeg | centidegrees clockwise from true north, `u16::MAX` invalid |
+| RSSI | signed dBm, clamp to `-127..=20` |
+| SNR | quarter-dB units, clamp to `-80..=80` |
+
+GPS is invalid when `lora_flags::GPS_VALID` is clear, `fix_type == 0`, or
+lat/lon use `lora_scaling::LAT_LON_INVALID_E7`.
+
+`LoRaLinkStatus` is owned by the radio or GS bridge. The bridge may emit it
+directly as HILink telemetry, or it may forward radio metadata to the FC and let
+the FC emit the packet. The implementation must document which component owns
+uplink and downlink RSSI/SNR.
+
+Use `LoRaCommand` for safety and mission commands. Use `LoRaSetProfile` and
+`LoRaRequestSnapshot` for common radio-management commands. `command_seq` is
+per-GS monotonic modulo `u16`. Receivers keep 16 command results or 30 seconds
+of duplicate cache and return duplicate ACK statuses with the original result.
+
+ACK timeout defaults:
+
+| Profile | Timeout | Retries |
+| --- | ---: | ---: |
+| SF7/500 kHz | 250 ms | 3 |
+| SF8/500 kHz | 400 ms | 3 |
+| SF8/250 kHz fallback | 750 ms | 4 |
+| Recovery beacon | 2000 ms | 2 |
+
+Scheduler priorities:
+
+| Priority | Traffic |
+| ---: | --- |
+| P0 | abort, motor stop, disarm |
+| P1 | command ACK/NACK |
+| P2 | faults and events |
+| P3 | flight snapshot |
+| P4 | GPS and link status |
+| P5 | requested debug |
+
+Commands preempt telemetry. Stale telemetry is droppable; stale commands are
+not. A flight snapshot is stale once a newer flight snapshot is queued.
 
 ### Waypoint Payloads
 
