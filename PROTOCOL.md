@@ -1,7 +1,18 @@
 # hilink Protocol Map
 
-All numeric fields are little-endian. Packet framing is
+All numeric fields are little-endian. Normal HILink UART packet framing is
 `COBS(Header + Payload + CRC16) + 0x00`.
+
+Normal HILink is the semantic API spoken by FC, GCS, host tools, and
+simulators. RF dialects are transport internals owned by radio bridge firmware:
+
+```text
+GCS <-> GS radio module        normal HILink
+GS radio <-> vehicle radio     compact RF dialect
+vehicle radio <-> FC           normal HILink
+```
+
+FC and GCS endpoints must not emit or consume RF dialect messages directly.
 
 ## Header
 
@@ -54,15 +65,9 @@ Header length: 12 bytes.
 | 65 | DshotCommand | DshotCommandPayload | host -> FC |
 | 66 | ActuatorStatusRequest | ActuatorStatusRequestPayload | host -> FC |
 | 67 | ActuatorStatus | ActuatorStatusPayload | FC -> host |
-| 81 | LoRaFlightSnapshot | LoRaFlightSnapshotPayload | FC -> GS |
-| 83 | LoRaGpsSnapshot | LoRaGpsSnapshotPayload | FC -> GS |
-| 85 | LoRaEvent | LoRaEventPayload | FC -> GS |
-| 86 | LoRaFaults | LoRaFaultsPayload | FC -> GS |
-| 87 | LoRaLinkStatus | LoRaLinkStatusPayload | bridge/FC -> GS |
-| 100 | LoRaCommand | LoRaCommandPayload | GS -> FC |
-| 101 | LoRaCommandAck | LoRaCommandAckPayload | FC -> GS |
-| 102 | LoRaSetProfile | LoRaSetProfilePayload | GS -> bridge/FC |
-| 103 | LoRaRequestSnapshot | LoRaRequestSnapshotPayload | GS -> bridge/FC |
+
+Normal HILink messages are the semantic API spoken by FC, GCS, host tools, and
+simulators. RF dialect messages are not valid `MsgType` values.
 
 ## Payload Sizes
 
@@ -78,21 +83,12 @@ Header length: 12 bytes.
 | MotorStopPayload | 0 |
 | ActuatorStatusRequestPayload | 0 |
 | AckPayload | 4 |
-| LoRaRequestSnapshotPayload | 4 |
 | NackPayload | 4 |
 | DshotCommandPayload | 4 |
 | BenchEnablePayload | 8 |
-| LoRaSetProfilePayload | 8 |
-| LoRaCommandAckPayload | 12 |
 | MotorTestPayload | 12 |
-| LoRaFaultsPayload | 14 |
-| LoRaEventPayload | 15 |
 | MotorSweepPayload | 16 |
-| LoRaCommandPayload | 16 |
-| LoRaLinkStatusPayload | 18 |
 | ActuatorStatusPayload | 20 |
-| LoRaFlightSnapshotPayload | 22 |
-| LoRaGpsSnapshotPayload | 22 |
 | HeartbeatPayload | 24 |
 | MotorStatePayload | 24 |
 | BaroPayload | 28 |
@@ -175,15 +171,66 @@ Header length: 12 bytes.
 | BaroPayload | stamp: SimStamp, pressure_pa: f32, altitude_m: f32, temperature_c: f32 |
 | GpsPayload | stamp: SimStamp, lat_deg: f64, lon_deg: f64, alt_msl_m: f32, vel_ned_mps: [f32; 3], sats: u8, fix_type: u8, reserved: [u8; 2] |
 
-## LoRa Payloads
+## RF Dialect Payloads
 
-LoRa messages are compact semantic packets intended for the flight radio link.
-Use the existing high-bandwidth HIL and component messages for USB, simulation,
-tests, and bench work.
+RF dialect messages are compact semantic packets intended for the flight radio
+link. They are not normal HILink messages and do not use the normal HILink
+12-byte header or COBS delimiter.
 
-V1 active messages are `LoRaFlightSnapshot`, `LoRaGpsSnapshot`,
-`LoRaLinkStatus`, `LoRaEvent`, `LoRaFaults`, `LoRaCommand`,
-`LoRaCommandAck`, `LoRaSetProfile`, and `LoRaRequestSnapshot`.
+The compact RF frame is:
+
+| Offset | Field | Type | Bytes |
+| ---: | --- | --- | ---: |
+| 0 | rf_msg_type | u8 | 1 |
+| 1 | payload | bytes | payload length |
+| 1 + payload_len | crc16 | u16 | 2 |
+
+CRC is CRC16-CCITT-FALSE over `rf_msg_type + payload`, stored little-endian.
+In Rust, compact RF helpers are available under `hilink::rf`, and LoRa payloads
+and constants are available under `hilink::rf::lora`.
+
+Pure bridge helpers are also available under `hilink::rf`:
+
+| Helper | Purpose |
+| --- | --- |
+| `telemetry_to_lora_flight` | Compress `TelemetrySnapshotPayload` into `LoRaFlightSnapshotPayload` |
+| `gps_to_lora_gps` | Compress `GpsPayload` into `LoRaGpsSnapshotPayload` |
+| `normal_command_to_lora` | Convert supported normal HILink commands into `LoRaCommandPayload` and correlation metadata |
+| `lora_command_to_normal` | Convert supported RF commands back into normal command identities |
+| `ack_to_lora_command_ack` | Convert normal `Ack`/`Nack` into RF command ACK using correlation metadata |
+| `lora_command_ack_to_normal` | Convert RF command ACK back into normal `Ack`/`Nack` using correlation metadata |
+
+V1 active RF message types:
+
+| RF ID | Message | Payload |
+| ---: | --- | --- |
+| 1 | LoRaFlightSnapshot | LoRaFlightSnapshotPayload |
+| 2 | LoRaGpsSnapshot | LoRaGpsSnapshotPayload |
+| 3 | LoRaEvent | LoRaEventPayload |
+| 4 | LoRaFaults | LoRaFaultsPayload |
+| 5 | LoRaLinkStatus | LoRaLinkStatusPayload |
+| 16 | LoRaCommand | LoRaCommandPayload |
+| 17 | LoRaCommandAck | LoRaCommandAckPayload |
+| 18 | LoRaSetProfile | LoRaSetProfilePayload |
+| 19 | LoRaRequestSnapshot | LoRaRequestSnapshotPayload |
+
+Use the existing high-bandwidth HIL and component messages for USB,
+simulation, tests, and bench work. Radio bridge firmware translates normal
+HILink messages to and from this RF dialect.
+
+RF payload sizes:
+
+| Payload | Bytes |
+| --- | ---: |
+| LoRaRequestSnapshotPayload | 4 |
+| LoRaSetProfilePayload | 8 |
+| LoRaCommandAckPayload | 12 |
+| LoRaFaultsPayload | 14 |
+| LoRaEventPayload | 15 |
+| LoRaCommandPayload | 16 |
+| LoRaLinkStatusPayload | 18 |
+| LoRaFlightSnapshotPayload | 22 |
+| LoRaGpsSnapshotPayload | 22 |
 
 ### LoRaFlightSnapshotPayload, 22 bytes
 
@@ -463,15 +510,20 @@ Scaling rules:
 GPS is invalid when `lora_flags::GPS_VALID` is clear, `fix_type == 0`, or
 lat/lon use `lora_scaling::LAT_LON_INVALID_E7`.
 
-`LoRaLinkStatus` is owned by the radio or GS bridge. The bridge may emit it
-directly as HILink telemetry, or it may forward radio metadata to the FC and let
-the FC emit the packet. The implementation must document which component owns
+`LoRaLinkStatus` is owned by radio bridge firmware. The FC should not emit RF
+dialect link-status frames. If link health is needed by the GCS over normal
+HILink, the GS radio module translates RF link metadata into a normal HILink
+status/reporting message. The implementation must document which component owns
 uplink and downlink RSSI/SNR.
 
-Use `LoRaCommand` for safety and mission commands. Use `LoRaSetProfile` and
-`LoRaRequestSnapshot` for common radio-management commands. `command_seq` is
-per-GS monotonic modulo `u16`. Receivers keep 16 command results or 30 seconds
-of duplicate cache and return duplicate ACK statuses with the original result.
+Use `LoRaCommand` inside the RF dialect for safety and mission commands. GCS and
+FC endpoints still use normal HILink commands such as `Arm`, `Disarm`, `Rtl`,
+`MotorStop`, `Ping`, `Ack`, and `Nack`. Use `LoRaSetProfile` and
+`LoRaRequestSnapshot` inside the RF dialect for common radio-management
+commands. `command_seq` is per-GS radio and monotonic modulo `u16`. Radio bridge
+firmware maintains the correlation between normal HILink `Header::seq` and RF
+`command_seq`. Receivers keep 16 command results or 30 seconds of duplicate
+cache and return duplicate ACK statuses with the original result.
 
 ACK timeout defaults:
 
@@ -481,6 +533,10 @@ ACK timeout defaults:
 | SF8/500 kHz | 400 ms | 3 |
 | SF8/250 kHz fallback | 750 ms | 4 |
 | Recovery beacon | 2000 ms | 2 |
+
+Bridge helpers return `UnsupportedTranslation` when no V1 mapping is defined
+for a message, and `CorrelationMismatch` when a normal ACK/NACK does not match
+the RF command correlation metadata.
 
 Scheduler priorities:
 

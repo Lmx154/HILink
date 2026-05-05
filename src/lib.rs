@@ -27,6 +27,9 @@ pub enum Error {
     CobsDecodeOverrun,
     CrcMismatch,
     UnknownMsgType,
+    UnknownRfMsgType,
+    UnsupportedTranslation,
+    CorrelationMismatch,
     InvalidPayloadLength,
 }
 
@@ -70,17 +73,6 @@ pub enum MsgType {
     DshotCommand = 65,
     ActuatorStatusRequest = 66,
     ActuatorStatus = 67,
-
-    LoRaFlightSnapshot = 81,
-    LoRaGpsSnapshot = 83,
-    LoRaEvent = 85,
-    LoRaFaults = 86,
-    LoRaLinkStatus = 87,
-
-    LoRaCommand = 100,
-    LoRaCommandAck = 101,
-    LoRaSetProfile = 102,
-    LoRaRequestSnapshot = 103,
 }
 
 impl TryFrom<u8> for MsgType {
@@ -121,16 +113,40 @@ impl TryFrom<u8> for MsgType {
             65 => Ok(Self::DshotCommand),
             66 => Ok(Self::ActuatorStatusRequest),
             67 => Ok(Self::ActuatorStatus),
-            81 => Ok(Self::LoRaFlightSnapshot),
-            83 => Ok(Self::LoRaGpsSnapshot),
-            85 => Ok(Self::LoRaEvent),
-            86 => Ok(Self::LoRaFaults),
-            87 => Ok(Self::LoRaLinkStatus),
-            100 => Ok(Self::LoRaCommand),
-            101 => Ok(Self::LoRaCommandAck),
-            102 => Ok(Self::LoRaSetProfile),
-            103 => Ok(Self::LoRaRequestSnapshot),
             _ => Err(Error::UnknownMsgType),
+        }
+    }
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RfMsgType {
+    LoRaFlightSnapshot = 1,
+    LoRaGpsSnapshot = 2,
+    LoRaEvent = 3,
+    LoRaFaults = 4,
+    LoRaLinkStatus = 5,
+    LoRaCommand = 16,
+    LoRaCommandAck = 17,
+    LoRaSetProfile = 18,
+    LoRaRequestSnapshot = 19,
+}
+
+impl TryFrom<u8> for RfMsgType {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self> {
+        match value {
+            1 => Ok(Self::LoRaFlightSnapshot),
+            2 => Ok(Self::LoRaGpsSnapshot),
+            3 => Ok(Self::LoRaEvent),
+            4 => Ok(Self::LoRaFaults),
+            5 => Ok(Self::LoRaLinkStatus),
+            16 => Ok(Self::LoRaCommand),
+            17 => Ok(Self::LoRaCommandAck),
+            18 => Ok(Self::LoRaSetProfile),
+            19 => Ok(Self::LoRaRequestSnapshot),
+            _ => Err(Error::UnknownRfMsgType),
         }
     }
 }
@@ -432,109 +448,300 @@ pub struct ActuatorStatusPayload {
     pub flags: u32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaFlightSnapshotPayload {
-    pub time_ms: u32,
-    pub state: u8,
-    pub mode: u8,
-    pub flags: u16,
-    pub altitude_dm: i32,
-    pub vertical_velocity_cms: i16,
-    pub accel_mag_cms2: u16,
-    pub battery_mv: u16,
-    pub pyro_or_actuator_flags: u16,
-    pub fault_summary: u16,
+pub mod rf {
+    pub use crate::{
+        CommandCorrelation, DecodedRfPacket, LoraCommandTranslation, LoraFlightSnapshotOptions,
+        LoraGpsSnapshotOptions, NormalAckTranslation, NormalCommand, RfMsgType, RfPayload,
+        TrafficPriority, ack_to_lora_command_ack, classify_normal_msg, classify_rf_msg,
+        decode_rf_packet, decode_rf_payload, encode_rf_packet, gps_to_lora_gps,
+        lora_command_ack_to_normal, lora_command_to_normal, normal_command_to_lora, rf_frame_len,
+        telemetry_to_lora_flight,
+    };
+
+    pub mod lora {
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaFlightSnapshotPayload {
+            pub time_ms: u32,
+            pub state: u8,
+            pub mode: u8,
+            pub flags: u16,
+            pub altitude_dm: i32,
+            pub vertical_velocity_cms: i16,
+            pub accel_mag_cms2: u16,
+            pub battery_mv: u16,
+            pub pyro_or_actuator_flags: u16,
+            pub fault_summary: u16,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaGpsSnapshotPayload {
+            pub time_ms: u32,
+            pub lat_e7: i32,
+            pub lon_e7: i32,
+            pub alt_msl_dm: i32,
+            pub ground_speed_cms: u16,
+            pub heading_cdeg: u16,
+            pub sats: u8,
+            pub fix_type: u8,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaEventPayload {
+            pub time_ms: u32,
+            pub event_id: u16,
+            pub severity: u8,
+            pub arg0: i32,
+            pub arg1: i32,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaFaultsPayload {
+            pub time_ms: u32,
+            pub active_faults: u32,
+            pub latched_faults: u32,
+            pub inhibit_flags: u16,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaLinkStatusPayload {
+            pub time_ms: u32,
+            pub uplink_rssi_dbm: i8,
+            pub uplink_snr_x4: i8,
+            pub downlink_rssi_dbm: i8,
+            pub downlink_snr_x4: i8,
+            pub rx_packets_delta: u16,
+            pub tx_packets_delta: u16,
+            pub lost_packets_delta: u16,
+            pub active_profile: u8,
+            pub telemetry_rate_hz: u8,
+            pub reserved: u16,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaCommandPayload {
+            pub command_id: u16,
+            pub command_seq: u16,
+            pub expires_ms: u16,
+            pub flags: u16,
+            pub arg0: i32,
+            pub arg1: i32,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaCommandAckPayload {
+            pub command_id: u16,
+            pub command_seq: u16,
+            pub status: u8,
+            pub reason: u8,
+            pub state: u8,
+            pub reserved: u8,
+            pub detail: i32,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaSetProfilePayload {
+            pub command_seq: u16,
+            pub profile: u8,
+            pub telemetry_rate_hz: u8,
+            pub gps_rate_hz: u8,
+            pub link_status_rate_hz: u8,
+            pub flags: u16,
+        }
+
+        #[repr(C)]
+        #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+        pub struct LoRaRequestSnapshotPayload {
+            pub command_seq: u16,
+            pub request_flags: u16,
+        }
+
+        pub mod lora_state {
+            pub const UNKNOWN: u8 = 0;
+            pub const BOOT: u8 = 1;
+            pub const STANDBY: u8 = 2;
+            pub const ARMED: u8 = 3;
+            pub const ASCENT: u8 = 4;
+            pub const COAST: u8 = 5;
+            pub const DESCENT: u8 = 6;
+            pub const LANDED: u8 = 7;
+            pub const ABORT: u8 = 8;
+            pub const FAILSAFE: u8 = 9;
+        }
+
+        pub mod lora_mode {
+            pub const UNKNOWN: u8 = 0;
+            pub const MANUAL: u8 = 1;
+            pub const AUTO: u8 = 2;
+            pub const GUIDED: u8 = 3;
+            pub const HIL: u8 = 4;
+            pub const RECOVERY: u8 = 5;
+        }
+
+        pub mod lora_flags {
+            pub const ARMED: u16 = 1 << 0;
+            pub const FAILSAFE: u16 = 1 << 1;
+            pub const GPS_VALID: u16 = 1 << 2;
+            pub const ESTIMATOR_VALID: u16 = 1 << 3;
+            pub const BATTERY_LOW: u16 = 1 << 4;
+            pub const PYRO_SAFE: u16 = 1 << 5;
+            pub const RADIO_DEGRADED: u16 = 1 << 6;
+            pub const RECOVERY_ACTIVE: u16 = 1 << 7;
+        }
+
+        pub mod lora_fault {
+            pub const IMU: u32 = 1 << 0;
+            pub const MAG: u32 = 1 << 1;
+            pub const BARO: u32 = 1 << 2;
+            pub const GPS: u32 = 1 << 3;
+            pub const ESTIMATOR: u32 = 1 << 4;
+            pub const BATTERY: u32 = 1 << 5;
+            pub const RADIO: u32 = 1 << 6;
+            pub const STORAGE: u32 = 1 << 7;
+            pub const ACTUATOR: u32 = 1 << 8;
+            pub const PYRO: u32 = 1 << 9;
+            pub const SAFETY_INHIBIT: u32 = 1 << 10;
+        }
+
+        pub mod lora_fault_summary {
+            pub const IMU: u16 = 1 << 0;
+            pub const MAG: u16 = 1 << 1;
+            pub const BARO: u16 = 1 << 2;
+            pub const GPS: u16 = 1 << 3;
+            pub const ESTIMATOR: u16 = 1 << 4;
+            pub const BATTERY: u16 = 1 << 5;
+            pub const RADIO: u16 = 1 << 6;
+            pub const STORAGE: u16 = 1 << 7;
+            pub const ACTUATOR: u16 = 1 << 8;
+            pub const PYRO: u16 = 1 << 9;
+            pub const SAFETY_INHIBIT: u16 = 1 << 10;
+        }
+
+        pub mod lora_pyro_actuator_flags {
+            pub const MOTOR_OUTPUT_ACTIVE: u16 = 1 << 0;
+            pub const MOTOR_OUTPUT_CLAMPED: u16 = 1 << 1;
+            pub const PYRO_CONTINUITY_1: u16 = 1 << 2;
+            pub const PYRO_CONTINUITY_2: u16 = 1 << 3;
+            pub const PYRO_FIRED_1: u16 = 1 << 4;
+            pub const PYRO_FIRED_2: u16 = 1 << 5;
+            pub const PYRO_INHIBITED: u16 = 1 << 6;
+        }
+
+        pub mod lora_profile {
+            pub const SF7_500KHZ_FAST: u8 = 0;
+            pub const SF8_500KHZ_BALANCED: u8 = 1;
+            pub const SF8_250KHZ_FALLBACK: u8 = 2;
+            pub const RECOVERY_BEACON: u8 = 3;
+        }
+
+        pub mod lora_command_id {
+            pub const ARM: u16 = 1;
+            pub const DISARM: u16 = 2;
+            pub const ABORT: u16 = 3;
+            pub const MOTOR_STOP: u16 = 4;
+            pub const SET_MODE: u16 = 5;
+            pub const SET_TELEMETRY_RATE: u16 = 6;
+            pub const SET_RADIO_PROFILE: u16 = 7;
+            pub const REQUEST_SNAPSHOT: u16 = 8;
+            pub const REQUEST_GPS: u16 = 9;
+            pub const REQUEST_FAULTS: u16 = 10;
+            pub const ENTER_RECOVERY_BEACON: u16 = 11;
+            pub const PING: u16 = 12;
+        }
+
+        pub mod lora_command_flags {
+            pub const URGENT: u16 = 1 << 0;
+            pub const REQUIRE_ARMED: u16 = 1 << 1;
+            pub const ALLOW_WHILE_FAILSAFE: u16 = 1 << 2;
+            pub const QUEUE_IF_BUSY: u16 = 1 << 3;
+        }
+
+        pub mod lora_command_status {
+            pub const ACCEPTED: u8 = 0;
+            pub const REJECTED: u8 = 1;
+            pub const DENIED_STATE: u8 = 2;
+            pub const DENIED_SAFETY: u8 = 3;
+            pub const INVALID_ARG: u8 = 4;
+            pub const EXPIRED: u8 = 5;
+            pub const DUPLICATE_ACCEPTED: u8 = 6;
+            pub const DUPLICATE_REJECTED: u8 = 7;
+            pub const BUSY: u8 = 8;
+        }
+
+        pub mod lora_command_reason {
+            pub const NONE: u8 = 0;
+            pub const BAD_STATE: u8 = 1;
+            pub const SAFETY_INHIBIT: u8 = 2;
+            pub const AUTH_REQUIRED: u8 = 3;
+            pub const UNSUPPORTED: u8 = 4;
+            pub const BAD_ARGUMENT: u8 = 5;
+            pub const EXPIRED: u8 = 6;
+            pub const DUPLICATE: u8 = 7;
+            pub const RADIO_BUSY: u8 = 8;
+        }
+
+        pub mod lora_profile_flags {
+            pub const TEMPORARY: u16 = 1 << 0;
+            pub const SAVE_DEFAULT: u16 = 1 << 1;
+            pub const ENTER_RECOVERY_RX_WINDOWS: u16 = 1 << 2;
+        }
+
+        pub mod lora_event_id {
+            pub const BOOT: u16 = 1;
+            pub const STATE_CHANGE: u16 = 2;
+            pub const MODE_CHANGE: u16 = 3;
+            pub const ARM_ACCEPTED: u16 = 4;
+            pub const DISARMED: u16 = 5;
+            pub const ABORT_TRIGGERED: u16 = 6;
+            pub const GPS_FIX_CHANGED: u16 = 7;
+            pub const RADIO_PROFILE_CHANGED: u16 = 8;
+            pub const FAULT_ASSERTED: u16 = 9;
+            pub const FAULT_CLEARED: u16 = 10;
+            pub const PYRO_FIRED: u16 = 11;
+            pub const RECOVERY_BEACON_ENTERED: u16 = 12;
+        }
+
+        pub mod lora_event_severity {
+            pub const INFO: u8 = 0;
+            pub const WARNING: u8 = 1;
+            pub const ERROR: u8 = 2;
+            pub const CRITICAL: u8 = 3;
+        }
+
+        pub mod lora_request_flags {
+            pub const FLIGHT: u16 = 1 << 0;
+            pub const GPS: u16 = 1 << 1;
+            pub const FAULTS: u16 = 1 << 2;
+            pub const LINK_STATUS: u16 = 1 << 3;
+        }
+
+        pub mod lora_scaling {
+            pub const ALTITUDE_DM_IS_AGL: bool = true;
+            pub const VERTICAL_VELOCITY_POSITIVE_UP: bool = true;
+            pub const LAT_LON_INVALID_E7: i32 = i32::MIN;
+            pub const ALTITUDE_INVALID_DM: i32 = i32::MIN;
+            pub const HEADING_INVALID_CDEG: u16 = u16::MAX;
+            pub const RSSI_MIN_DBM: i8 = -127;
+            pub const RSSI_MAX_DBM: i8 = 20;
+            pub const SNR_X4_MIN: i8 = -80;
+            pub const SNR_X4_MAX: i8 = 80;
+        }
+    }
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaGpsSnapshotPayload {
-    pub time_ms: u32,
-    pub lat_e7: i32,
-    pub lon_e7: i32,
-    pub alt_msl_dm: i32,
-    pub ground_speed_cms: u16,
-    pub heading_cdeg: u16,
-    pub sats: u8,
-    pub fix_type: u8,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaEventPayload {
-    pub time_ms: u32,
-    pub event_id: u16,
-    pub severity: u8,
-    pub arg0: i32,
-    pub arg1: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaFaultsPayload {
-    pub time_ms: u32,
-    pub active_faults: u32,
-    pub latched_faults: u32,
-    pub inhibit_flags: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaLinkStatusPayload {
-    pub time_ms: u32,
-    pub uplink_rssi_dbm: i8,
-    pub uplink_snr_x4: i8,
-    pub downlink_rssi_dbm: i8,
-    pub downlink_snr_x4: i8,
-    pub rx_packets_delta: u16,
-    pub tx_packets_delta: u16,
-    pub lost_packets_delta: u16,
-    pub active_profile: u8,
-    pub telemetry_rate_hz: u8,
-    pub reserved: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaCommandPayload {
-    pub command_id: u16,
-    pub command_seq: u16,
-    pub expires_ms: u16,
-    pub flags: u16,
-    pub arg0: i32,
-    pub arg1: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaCommandAckPayload {
-    pub command_id: u16,
-    pub command_seq: u16,
-    pub status: u8,
-    pub reason: u8,
-    pub state: u8,
-    pub reserved: u8,
-    pub detail: i32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaSetProfilePayload {
-    pub command_seq: u16,
-    pub profile: u8,
-    pub telemetry_rate_hz: u8,
-    pub gps_rate_hz: u8,
-    pub link_status_rate_hz: u8,
-    pub flags: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LoRaRequestSnapshotPayload {
-    pub command_seq: u16,
-    pub request_flags: u16,
-}
+use rf::lora::{
+    LoRaCommandAckPayload, LoRaCommandPayload, LoRaEventPayload, LoRaFaultsPayload,
+    LoRaFlightSnapshotPayload, LoRaGpsSnapshotPayload, LoRaLinkStatusPayload,
+    LoRaRequestSnapshotPayload, LoRaSetProfilePayload, lora_command_id, lora_command_reason,
+    lora_command_status, lora_flags, lora_scaling,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -585,6 +792,81 @@ pub struct DecodedPacket<'a> {
     pub payload: &'a [u8],
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodedRfPacket<'a> {
+    pub msg_type: RfMsgType,
+    pub payload: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrafficPriority {
+    P0Safety,
+    P1Ack,
+    P2EventFault,
+    P3FlightTelemetry,
+    P4BackgroundTelemetry,
+    P5Debug,
+    Unsupported,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommandCorrelation {
+    pub normal_seq: u16,
+    pub normal_msg_type: MsgType,
+    pub rf_command_seq: u16,
+    pub rf_command_id: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoraFlightSnapshotOptions {
+    pub time_ms: u32,
+    pub mode: u8,
+    pub gps_valid: bool,
+    pub accel_mag_cms2: u16,
+    pub pyro_or_actuator_flags: u16,
+    pub fault_summary: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoraGpsSnapshotOptions {
+    pub time_ms: u32,
+    pub ground_speed_cms: u16,
+    pub heading_cdeg: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LoraCommandTranslation {
+    pub command: LoRaCommandPayload,
+    pub correlation: CommandCorrelation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NormalCommand {
+    Ping,
+    Arm,
+    Disarm,
+    Rtl,
+    MotorStop,
+}
+
+impl NormalCommand {
+    pub const fn msg_type(self) -> MsgType {
+        match self {
+            Self::Ping => MsgType::Ping,
+            Self::Arm => MsgType::Arm,
+            Self::Disarm => MsgType::Disarm,
+            Self::Rtl => MsgType::Rtl,
+            Self::MotorStop => MsgType::MotorStop,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NormalAckTranslation {
+    Ack(AckPayload),
+    Nack(NackPayload),
+}
+
 pub mod valid {
     pub const ACCEL: u32 = 1 << 0;
     pub const GYRO: u32 = 1 << 1;
@@ -633,179 +915,16 @@ pub mod actuator_flags {
     pub const BENCH_MODE_ENABLED: u32 = 1 << 4;
 }
 
-pub mod lora_state {
-    pub const UNKNOWN: u8 = 0;
-    pub const BOOT: u8 = 1;
-    pub const STANDBY: u8 = 2;
-    pub const ARMED: u8 = 3;
-    pub const ASCENT: u8 = 4;
-    pub const COAST: u8 = 5;
-    pub const DESCENT: u8 = 6;
-    pub const LANDED: u8 = 7;
-    pub const ABORT: u8 = 8;
-    pub const FAILSAFE: u8 = 9;
-}
-
-pub mod lora_mode {
-    pub const UNKNOWN: u8 = 0;
-    pub const MANUAL: u8 = 1;
-    pub const AUTO: u8 = 2;
-    pub const GUIDED: u8 = 3;
-    pub const HIL: u8 = 4;
-    pub const RECOVERY: u8 = 5;
-}
-
-pub mod lora_flags {
-    pub const ARMED: u16 = 1 << 0;
-    pub const FAILSAFE: u16 = 1 << 1;
-    pub const GPS_VALID: u16 = 1 << 2;
-    pub const ESTIMATOR_VALID: u16 = 1 << 3;
-    pub const BATTERY_LOW: u16 = 1 << 4;
-    pub const PYRO_SAFE: u16 = 1 << 5;
-    pub const RADIO_DEGRADED: u16 = 1 << 6;
-    pub const RECOVERY_ACTIVE: u16 = 1 << 7;
-}
-
-pub mod lora_fault {
-    pub const IMU: u32 = 1 << 0;
-    pub const MAG: u32 = 1 << 1;
-    pub const BARO: u32 = 1 << 2;
-    pub const GPS: u32 = 1 << 3;
-    pub const ESTIMATOR: u32 = 1 << 4;
-    pub const BATTERY: u32 = 1 << 5;
-    pub const RADIO: u32 = 1 << 6;
-    pub const STORAGE: u32 = 1 << 7;
-    pub const ACTUATOR: u32 = 1 << 8;
-    pub const PYRO: u32 = 1 << 9;
-    pub const SAFETY_INHIBIT: u32 = 1 << 10;
-}
-
-pub mod lora_fault_summary {
-    pub const IMU: u16 = 1 << 0;
-    pub const MAG: u16 = 1 << 1;
-    pub const BARO: u16 = 1 << 2;
-    pub const GPS: u16 = 1 << 3;
-    pub const ESTIMATOR: u16 = 1 << 4;
-    pub const BATTERY: u16 = 1 << 5;
-    pub const RADIO: u16 = 1 << 6;
-    pub const STORAGE: u16 = 1 << 7;
-    pub const ACTUATOR: u16 = 1 << 8;
-    pub const PYRO: u16 = 1 << 9;
-    pub const SAFETY_INHIBIT: u16 = 1 << 10;
-}
-
-pub mod lora_pyro_actuator_flags {
-    pub const MOTOR_OUTPUT_ACTIVE: u16 = 1 << 0;
-    pub const MOTOR_OUTPUT_CLAMPED: u16 = 1 << 1;
-    pub const PYRO_CONTINUITY_1: u16 = 1 << 2;
-    pub const PYRO_CONTINUITY_2: u16 = 1 << 3;
-    pub const PYRO_FIRED_1: u16 = 1 << 4;
-    pub const PYRO_FIRED_2: u16 = 1 << 5;
-    pub const PYRO_INHIBITED: u16 = 1 << 6;
-}
-
-pub mod lora_profile {
-    pub const SF7_500KHZ_FAST: u8 = 0;
-    pub const SF8_500KHZ_BALANCED: u8 = 1;
-    pub const SF8_250KHZ_FALLBACK: u8 = 2;
-    pub const RECOVERY_BEACON: u8 = 3;
-}
-
-pub mod lora_command_id {
-    pub const ARM: u16 = 1;
-    pub const DISARM: u16 = 2;
-    pub const ABORT: u16 = 3;
-    pub const MOTOR_STOP: u16 = 4;
-    pub const SET_MODE: u16 = 5;
-    pub const SET_TELEMETRY_RATE: u16 = 6;
-    pub const SET_RADIO_PROFILE: u16 = 7;
-    pub const REQUEST_SNAPSHOT: u16 = 8;
-    pub const REQUEST_GPS: u16 = 9;
-    pub const REQUEST_FAULTS: u16 = 10;
-    pub const ENTER_RECOVERY_BEACON: u16 = 11;
-    pub const PING: u16 = 12;
-}
-
-pub mod lora_command_flags {
-    pub const URGENT: u16 = 1 << 0;
-    pub const REQUIRE_ARMED: u16 = 1 << 1;
-    pub const ALLOW_WHILE_FAILSAFE: u16 = 1 << 2;
-    pub const QUEUE_IF_BUSY: u16 = 1 << 3;
-}
-
-pub mod lora_command_status {
-    pub const ACCEPTED: u8 = 0;
-    pub const REJECTED: u8 = 1;
-    pub const DENIED_STATE: u8 = 2;
-    pub const DENIED_SAFETY: u8 = 3;
-    pub const INVALID_ARG: u8 = 4;
-    pub const EXPIRED: u8 = 5;
-    pub const DUPLICATE_ACCEPTED: u8 = 6;
-    pub const DUPLICATE_REJECTED: u8 = 7;
-    pub const BUSY: u8 = 8;
-}
-
-pub mod lora_command_reason {
-    pub const NONE: u8 = 0;
-    pub const BAD_STATE: u8 = 1;
-    pub const SAFETY_INHIBIT: u8 = 2;
-    pub const AUTH_REQUIRED: u8 = 3;
-    pub const UNSUPPORTED: u8 = 4;
-    pub const BAD_ARGUMENT: u8 = 5;
-    pub const EXPIRED: u8 = 6;
-    pub const DUPLICATE: u8 = 7;
-    pub const RADIO_BUSY: u8 = 8;
-}
-
-pub mod lora_profile_flags {
-    pub const TEMPORARY: u16 = 1 << 0;
-    pub const SAVE_DEFAULT: u16 = 1 << 1;
-    pub const ENTER_RECOVERY_RX_WINDOWS: u16 = 1 << 2;
-}
-
-pub mod lora_event_id {
-    pub const BOOT: u16 = 1;
-    pub const STATE_CHANGE: u16 = 2;
-    pub const MODE_CHANGE: u16 = 3;
-    pub const ARM_ACCEPTED: u16 = 4;
-    pub const DISARMED: u16 = 5;
-    pub const ABORT_TRIGGERED: u16 = 6;
-    pub const GPS_FIX_CHANGED: u16 = 7;
-    pub const RADIO_PROFILE_CHANGED: u16 = 8;
-    pub const FAULT_ASSERTED: u16 = 9;
-    pub const FAULT_CLEARED: u16 = 10;
-    pub const PYRO_FIRED: u16 = 11;
-    pub const RECOVERY_BEACON_ENTERED: u16 = 12;
-}
-
-pub mod lora_event_severity {
-    pub const INFO: u8 = 0;
-    pub const WARNING: u8 = 1;
-    pub const ERROR: u8 = 2;
-    pub const CRITICAL: u8 = 3;
-}
-
-pub mod lora_request_flags {
-    pub const FLIGHT: u16 = 1 << 0;
-    pub const GPS: u16 = 1 << 1;
-    pub const FAULTS: u16 = 1 << 2;
-    pub const LINK_STATUS: u16 = 1 << 3;
-}
-
-pub mod lora_scaling {
-    pub const ALTITUDE_DM_IS_AGL: bool = true;
-    pub const VERTICAL_VELOCITY_POSITIVE_UP: bool = true;
-    pub const LAT_LON_INVALID_E7: i32 = i32::MIN;
-    pub const ALTITUDE_INVALID_DM: i32 = i32::MIN;
-    pub const HEADING_INVALID_CDEG: u16 = u16::MAX;
-    pub const RSSI_MIN_DBM: i8 = -127;
-    pub const RSSI_MAX_DBM: i8 = 20;
-    pub const SNR_X4_MIN: i8 = -80;
-    pub const SNR_X4_MAX: i8 = 80;
-}
-
 pub trait WirePayload: Sized {
     const MSG_TYPE: MsgType;
+    const WIRE_LEN: usize;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize>;
+    fn decode_payload(input: &[u8]) -> Result<Self>;
+}
+
+pub trait RfPayload: Sized {
+    const RF_MSG_TYPE: RfMsgType;
     const WIRE_LEN: usize;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize>;
@@ -819,6 +938,10 @@ pub const fn encoded_frame_len(payload_len: usize) -> usize {
 
 pub const fn raw_frame_len(payload_len: usize) -> usize {
     HEADER_LEN + payload_len + CRC_LEN
+}
+
+pub const fn rf_frame_len(payload_len: usize) -> usize {
+    1 + payload_len + CRC_LEN
 }
 
 pub fn encode_packet<P: WirePayload>(
@@ -907,6 +1030,321 @@ pub fn decode_payload<P: WirePayload>(packet: &DecodedPacket<'_>) -> Result<P> {
         return Err(Error::UnknownMsgType);
     }
     P::decode_payload(packet.payload)
+}
+
+pub fn encode_rf_packet<P: RfPayload>(payload: &P, out: &mut [u8]) -> Result<usize> {
+    let frame_len = rf_frame_len(P::WIRE_LEN);
+    if out.len() < frame_len {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = P::RF_MSG_TYPE as u8;
+    let written = payload.encode_payload(&mut out[1..1 + P::WIRE_LEN])?;
+    if written != P::WIRE_LEN {
+        return Err(Error::InvalidPayloadLength);
+    }
+
+    let crc = crc16_ccitt_false(&out[..1 + P::WIRE_LEN]);
+    out[1 + P::WIRE_LEN..frame_len].copy_from_slice(&crc.to_le_bytes());
+    Ok(frame_len)
+}
+
+pub fn decode_rf_packet(input: &[u8]) -> Result<DecodedRfPacket<'_>> {
+    if input.len() < 1 + CRC_LEN {
+        return Err(Error::HeaderTooShort);
+    }
+
+    let packet_len = input.len() - CRC_LEN;
+    let stored_crc = u16::from_le_bytes([input[packet_len], input[packet_len + 1]]);
+    let computed_crc = crc16_ccitt_false(&input[..packet_len]);
+    if stored_crc != computed_crc {
+        return Err(Error::CrcMismatch);
+    }
+
+    Ok(DecodedRfPacket {
+        msg_type: RfMsgType::try_from(input[0])?,
+        payload: &input[1..packet_len],
+    })
+}
+
+pub fn decode_rf_payload<P: RfPayload>(packet: &DecodedRfPacket<'_>) -> Result<P> {
+    if packet.msg_type != P::RF_MSG_TYPE {
+        return Err(Error::UnknownRfMsgType);
+    }
+    P::decode_payload(packet.payload)
+}
+
+pub const fn classify_normal_msg(msg_type: MsgType, flags: u8) -> TrafficPriority {
+    match msg_type {
+        MsgType::Disarm | MsgType::MotorStop => TrafficPriority::P0Safety,
+        MsgType::Ack | MsgType::Nack => TrafficPriority::P1Ack,
+        MsgType::Arm
+        | MsgType::Rtl
+        | MsgType::BenchEnable
+        | MsgType::BenchDisable
+        | MsgType::MotorTest
+        | MsgType::MotorSweep
+        | MsgType::DshotCommand
+        | MsgType::ActuatorStatusRequest
+        | MsgType::ControlWaypoint
+        | MsgType::CvWaypoint
+        | MsgType::TofWaypoint
+        | MsgType::MissionWaypoint => {
+            if flags & header_flags::URGENT_CONTROL != 0 {
+                TrafficPriority::P0Safety
+            } else {
+                TrafficPriority::P1Ack
+            }
+        }
+        MsgType::Heartbeat
+        | MsgType::SystemState
+        | MsgType::MotorState
+        | MsgType::EstimatorState
+        | MsgType::TelemetrySnapshot
+        | MsgType::ActuatorStatus => TrafficPriority::P3FlightTelemetry,
+        MsgType::Gps | MsgType::Battery | MsgType::RadioStatus => {
+            TrafficPriority::P4BackgroundTelemetry
+        }
+        MsgType::Ping | MsgType::Pong | MsgType::Imu | MsgType::Mag | MsgType::Baro => {
+            TrafficPriority::P5Debug
+        }
+        MsgType::HilSensorFrame | MsgType::HilResponseFrame | MsgType::HilReady => {
+            TrafficPriority::Unsupported
+        }
+    }
+}
+
+pub const fn classify_rf_msg(msg_type: RfMsgType) -> TrafficPriority {
+    match msg_type {
+        RfMsgType::LoRaCommand => TrafficPriority::P0Safety,
+        RfMsgType::LoRaCommandAck | RfMsgType::LoRaSetProfile => TrafficPriority::P1Ack,
+        RfMsgType::LoRaEvent | RfMsgType::LoRaFaults => TrafficPriority::P2EventFault,
+        RfMsgType::LoRaFlightSnapshot => TrafficPriority::P3FlightTelemetry,
+        RfMsgType::LoRaGpsSnapshot | RfMsgType::LoRaLinkStatus | RfMsgType::LoRaRequestSnapshot => {
+            TrafficPriority::P4BackgroundTelemetry
+        }
+    }
+}
+
+pub fn telemetry_to_lora_flight(
+    telemetry: &TelemetrySnapshotPayload,
+    options: LoraFlightSnapshotOptions,
+) -> LoRaFlightSnapshotPayload {
+    let mut flags = 0u16;
+    if telemetry.flags & response_flags::ARMED != 0 {
+        flags |= lora_flags::ARMED;
+    }
+    if telemetry.flags & response_flags::FAILSAFE != 0 {
+        flags |= lora_flags::FAILSAFE;
+    }
+    if telemetry.flags & response_flags::ESTIMATOR_VALID != 0 {
+        flags |= lora_flags::ESTIMATOR_VALID;
+    }
+    if options.gps_valid {
+        flags |= lora_flags::GPS_VALID;
+    }
+
+    LoRaFlightSnapshotPayload {
+        time_ms: options.time_ms,
+        state: telemetry.system_state,
+        mode: options.mode,
+        flags,
+        altitude_dm: f32_to_i32_saturated(-telemetry.position_ned_m[2] * 10.0, i32::MIN + 1),
+        vertical_velocity_cms: f32_to_i16_saturated(-telemetry.velocity_ned_mps[2] * 100.0),
+        accel_mag_cms2: options.accel_mag_cms2,
+        battery_mv: f32_to_u16_saturated(telemetry.battery_voltage_v * 1000.0),
+        pyro_or_actuator_flags: options.pyro_or_actuator_flags,
+        fault_summary: options.fault_summary,
+    }
+}
+
+pub fn gps_to_lora_gps(
+    gps: &GpsPayload,
+    options: LoraGpsSnapshotOptions,
+) -> LoRaGpsSnapshotPayload {
+    let position_valid = gps.fix_type != 0 && gps.lat_deg.is_finite() && gps.lon_deg.is_finite();
+
+    LoRaGpsSnapshotPayload {
+        time_ms: options.time_ms,
+        lat_e7: if position_valid {
+            f64_to_i32_saturated(gps.lat_deg * 10_000_000.0, i32::MIN + 1)
+        } else {
+            lora_scaling::LAT_LON_INVALID_E7
+        },
+        lon_e7: if position_valid {
+            f64_to_i32_saturated(gps.lon_deg * 10_000_000.0, i32::MIN + 1)
+        } else {
+            lora_scaling::LAT_LON_INVALID_E7
+        },
+        alt_msl_dm: if gps.alt_msl_m.is_finite() {
+            f32_to_i32_saturated(gps.alt_msl_m * 10.0, i32::MIN + 1)
+        } else {
+            lora_scaling::ALTITUDE_INVALID_DM
+        },
+        ground_speed_cms: options.ground_speed_cms,
+        heading_cdeg: options.heading_cdeg,
+        sats: gps.sats,
+        fix_type: gps.fix_type,
+    }
+}
+
+pub fn normal_command_to_lora(
+    msg_type: MsgType,
+    normal_seq: u16,
+    command_seq: u16,
+    expires_ms: u16,
+    flags: u16,
+) -> Result<LoraCommandTranslation> {
+    let command_id = match msg_type {
+        MsgType::Ping => lora_command_id::PING,
+        MsgType::Arm => lora_command_id::ARM,
+        MsgType::Disarm => lora_command_id::DISARM,
+        MsgType::Rtl => lora_command_id::ENTER_RECOVERY_BEACON,
+        MsgType::MotorStop => lora_command_id::MOTOR_STOP,
+        _ => return Err(Error::UnsupportedTranslation),
+    };
+
+    Ok(LoraCommandTranslation {
+        command: LoRaCommandPayload {
+            command_id,
+            command_seq,
+            expires_ms,
+            flags,
+            arg0: 0,
+            arg1: 0,
+        },
+        correlation: CommandCorrelation {
+            normal_seq,
+            normal_msg_type: msg_type,
+            rf_command_seq: command_seq,
+            rf_command_id: command_id,
+        },
+    })
+}
+
+pub fn lora_command_to_normal(command: &LoRaCommandPayload) -> Result<NormalCommand> {
+    match command.command_id {
+        lora_command_id::PING => Ok(NormalCommand::Ping),
+        lora_command_id::ARM => Ok(NormalCommand::Arm),
+        lora_command_id::DISARM => Ok(NormalCommand::Disarm),
+        lora_command_id::ENTER_RECOVERY_BEACON => Ok(NormalCommand::Rtl),
+        lora_command_id::MOTOR_STOP => Ok(NormalCommand::MotorStop),
+        _ => Err(Error::UnsupportedTranslation),
+    }
+}
+
+pub fn ack_to_lora_command_ack(
+    ack: NormalAckTranslation,
+    correlation: &CommandCorrelation,
+    state: u8,
+) -> Result<LoRaCommandAckPayload> {
+    match ack {
+        NormalAckTranslation::Ack(payload) => {
+            if payload.acked_seq != correlation.normal_seq
+                || payload.acked_msg_type != correlation.normal_msg_type as u8
+            {
+                return Err(Error::CorrelationMismatch);
+            }
+
+            Ok(LoRaCommandAckPayload {
+                command_id: correlation.rf_command_id,
+                command_seq: correlation.rf_command_seq,
+                status: lora_command_status::ACCEPTED,
+                reason: lora_command_reason::NONE,
+                state,
+                reserved: 0,
+                detail: i32::from(payload.status),
+            })
+        }
+        NormalAckTranslation::Nack(payload) => {
+            if payload.rejected_seq != correlation.normal_seq
+                || payload.rejected_msg_type != correlation.normal_msg_type as u8
+            {
+                return Err(Error::CorrelationMismatch);
+            }
+
+            Ok(LoRaCommandAckPayload {
+                command_id: correlation.rf_command_id,
+                command_seq: correlation.rf_command_seq,
+                status: lora_command_status::REJECTED,
+                reason: payload.reason,
+                state,
+                reserved: 0,
+                detail: 0,
+            })
+        }
+    }
+}
+
+pub fn lora_command_ack_to_normal(
+    ack: &LoRaCommandAckPayload,
+    correlation: &CommandCorrelation,
+) -> Result<NormalAckTranslation> {
+    if ack.command_id != correlation.rf_command_id || ack.command_seq != correlation.rf_command_seq
+    {
+        return Err(Error::CorrelationMismatch);
+    }
+
+    match ack.status {
+        lora_command_status::ACCEPTED | lora_command_status::DUPLICATE_ACCEPTED => {
+            Ok(NormalAckTranslation::Ack(AckPayload {
+                acked_seq: correlation.normal_seq,
+                acked_msg_type: correlation.normal_msg_type as u8,
+                status: ack.status,
+            }))
+        }
+        _ => Ok(NormalAckTranslation::Nack(NackPayload {
+            rejected_seq: correlation.normal_seq,
+            rejected_msg_type: correlation.normal_msg_type as u8,
+            reason: ack.reason,
+        })),
+    }
+}
+
+fn f32_to_i16_saturated(value: f32) -> i16 {
+    if !value.is_finite() {
+        0
+    } else if value <= i16::MIN as f32 {
+        i16::MIN
+    } else if value >= i16::MAX as f32 {
+        i16::MAX
+    } else {
+        value as i16
+    }
+}
+
+fn f32_to_i32_saturated(value: f32, min_value: i32) -> i32 {
+    if !value.is_finite() {
+        min_value
+    } else if value <= min_value as f32 {
+        min_value
+    } else if value >= i32::MAX as f32 {
+        i32::MAX
+    } else {
+        value as i32
+    }
+}
+
+fn f64_to_i32_saturated(value: f64, min_value: i32) -> i32 {
+    if !value.is_finite() {
+        min_value
+    } else if value <= min_value as f64 {
+        min_value
+    } else if value >= i32::MAX as f64 {
+        i32::MAX
+    } else {
+        value as i32
+    }
+}
+
+fn f32_to_u16_saturated(value: f32) -> u16 {
+    if !value.is_finite() || value <= 0.0 {
+        0
+    } else if value >= u16::MAX as f32 {
+        u16::MAX
+    } else {
+        value as u16
+    }
 }
 
 pub fn crc16_ccitt_false(bytes: &[u8]) -> u16 {
@@ -1613,8 +2051,8 @@ impl WirePayload for ActuatorStatusPayload {
     }
 }
 
-impl WirePayload for LoRaFlightSnapshotPayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaFlightSnapshot;
+impl RfPayload for LoRaFlightSnapshotPayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaFlightSnapshot;
     const WIRE_LEN: usize = 22;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -1650,8 +2088,8 @@ impl WirePayload for LoRaFlightSnapshotPayload {
     }
 }
 
-impl WirePayload for LoRaGpsSnapshotPayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaGpsSnapshot;
+impl RfPayload for LoRaGpsSnapshotPayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaGpsSnapshot;
     const WIRE_LEN: usize = 22;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -1683,8 +2121,8 @@ impl WirePayload for LoRaGpsSnapshotPayload {
     }
 }
 
-impl WirePayload for LoRaEventPayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaEvent;
+impl RfPayload for LoRaEventPayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaEvent;
     const WIRE_LEN: usize = 15;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -1710,8 +2148,8 @@ impl WirePayload for LoRaEventPayload {
     }
 }
 
-impl WirePayload for LoRaFaultsPayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaFaults;
+impl RfPayload for LoRaFaultsPayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaFaults;
     const WIRE_LEN: usize = 14;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -1735,8 +2173,8 @@ impl WirePayload for LoRaFaultsPayload {
     }
 }
 
-impl WirePayload for LoRaLinkStatusPayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaLinkStatus;
+impl RfPayload for LoRaLinkStatusPayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaLinkStatus;
     const WIRE_LEN: usize = 18;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -1774,8 +2212,8 @@ impl WirePayload for LoRaLinkStatusPayload {
     }
 }
 
-impl WirePayload for LoRaCommandPayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaCommand;
+impl RfPayload for LoRaCommandPayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaCommand;
     const WIRE_LEN: usize = 16;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -1803,8 +2241,8 @@ impl WirePayload for LoRaCommandPayload {
     }
 }
 
-impl WirePayload for LoRaCommandAckPayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaCommandAck;
+impl RfPayload for LoRaCommandAckPayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaCommandAck;
     const WIRE_LEN: usize = 12;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -1834,8 +2272,8 @@ impl WirePayload for LoRaCommandAckPayload {
     }
 }
 
-impl WirePayload for LoRaSetProfilePayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaSetProfile;
+impl RfPayload for LoRaSetProfilePayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaSetProfile;
     const WIRE_LEN: usize = 8;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -1863,8 +2301,8 @@ impl WirePayload for LoRaSetProfilePayload {
     }
 }
 
-impl WirePayload for LoRaRequestSnapshotPayload {
-    const MSG_TYPE: MsgType = MsgType::LoRaRequestSnapshot;
+impl RfPayload for LoRaRequestSnapshotPayload {
+    const RF_MSG_TYPE: RfMsgType = RfMsgType::LoRaRequestSnapshot;
     const WIRE_LEN: usize = 4;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
@@ -2104,21 +2542,23 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
     use core::fmt::Debug;
+    use rf::lora::{
+        lora_event_id, lora_event_severity, lora_fault, lora_fault_summary, lora_mode,
+        lora_profile, lora_pyro_actuator_flags, lora_request_flags, lora_state,
+    };
 
-    fn assert_packet_round_trip<P>(payload: P, msg_type: MsgType)
+    fn assert_rf_packet_round_trip<P>(payload: P, msg_type: RfMsgType)
     where
-        P: WirePayload + Copy + Debug + Eq,
+        P: RfPayload + Copy + Debug + Eq,
     {
-        let mut raw = [0u8; 80];
-        let mut encoded = [0u8; 96];
-        let encoded_len = encode_packet(&payload, 101, 20_001, &mut raw, &mut encoded).unwrap();
+        let mut encoded = [0u8; 32];
+        let encoded_len = encode_rf_packet(&payload, &mut encoded).unwrap();
 
-        let mut decoded_raw = [0u8; 80];
-        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
-        let decoded = decode_payload::<P>(&packet).unwrap();
+        let packet = decode_rf_packet(&encoded[..encoded_len]).unwrap();
+        let decoded = decode_rf_payload::<P>(&packet).unwrap();
 
-        assert_eq!(packet.header.message_type().unwrap(), msg_type);
-        assert_eq!(packet.header.payload_len, P::WIRE_LEN as u16);
+        assert_eq!(packet.msg_type, msg_type);
+        assert_eq!(packet.payload.len(), P::WIRE_LEN);
         assert_eq!(decoded, payload);
     }
 
@@ -2294,14 +2734,159 @@ mod tests {
     }
 
     #[test]
-    fn lora_deferred_message_ids_are_not_active_v1() {
-        assert_eq!(MsgType::try_from(80), Err(Error::UnknownMsgType));
-        assert_eq!(MsgType::try_from(82), Err(Error::UnknownMsgType));
-        assert_eq!(MsgType::try_from(84), Err(Error::UnknownMsgType));
+    fn rf_message_ids_use_rf_namespace() {
+        assert_eq!(RfMsgType::try_from(1), Ok(RfMsgType::LoRaFlightSnapshot));
+        assert_eq!(RfMsgType::try_from(16), Ok(RfMsgType::LoRaCommand));
     }
 
     #[test]
-    fn lora_flight_snapshot_packet_round_trip() {
+    fn traffic_classification_separates_normal_and_rf() {
+        assert_eq!(
+            classify_normal_msg(MsgType::MotorStop, 0),
+            TrafficPriority::P0Safety
+        );
+        assert_eq!(
+            classify_normal_msg(MsgType::TelemetrySnapshot, 0),
+            TrafficPriority::P3FlightTelemetry
+        );
+        assert_eq!(
+            classify_normal_msg(MsgType::HilSensorFrame, 0),
+            TrafficPriority::Unsupported
+        );
+        assert_eq!(
+            classify_rf_msg(RfMsgType::LoRaSetProfile),
+            TrafficPriority::P1Ack
+        );
+        assert_eq!(
+            classify_rf_msg(RfMsgType::LoRaGpsSnapshot),
+            TrafficPriority::P4BackgroundTelemetry
+        );
+    }
+
+    #[test]
+    fn telemetry_snapshot_translates_to_lora_flight() {
+        let telemetry = TelemetrySnapshotPayload {
+            stamp: SimStamp {
+                sim_tick: 12,
+                sim_time_us: 34_000,
+            },
+            system_state: lora_state::ASCENT,
+            reserved0: [0; 3],
+            flags: response_flags::ARMED | response_flags::ESTIMATOR_VALID,
+            position_ned_m: [1.0, 2.0, -12.3],
+            velocity_ned_mps: [0.0, 0.0, -2.5],
+            attitude_quat: [1.0, 0.0, 0.0, 0.0],
+            battery_voltage_v: 16.2,
+            rssi_dbm: -60,
+            snr_db_x100: 700,
+            loss_pct_x100: 0,
+        };
+
+        let snapshot = telemetry_to_lora_flight(
+            &telemetry,
+            LoraFlightSnapshotOptions {
+                time_ms: 99,
+                mode: lora_mode::HIL,
+                gps_valid: true,
+                accel_mag_cms2: 981,
+                pyro_or_actuator_flags: lora_pyro_actuator_flags::MOTOR_OUTPUT_ACTIVE,
+                fault_summary: lora_fault_summary::BARO,
+            },
+        );
+
+        assert_eq!(snapshot.time_ms, 99);
+        assert_eq!(snapshot.state, lora_state::ASCENT);
+        assert_eq!(snapshot.mode, lora_mode::HIL);
+        assert_eq!(
+            snapshot.flags,
+            lora_flags::ARMED | lora_flags::ESTIMATOR_VALID | lora_flags::GPS_VALID
+        );
+        assert_eq!(snapshot.altitude_dm, 123);
+        assert_eq!(snapshot.vertical_velocity_cms, 250);
+        assert_eq!(snapshot.battery_mv, 16_200);
+    }
+
+    #[test]
+    fn gps_translates_to_lora_gps_with_invalid_sentinels() {
+        let gps = GpsPayload {
+            stamp: SimStamp {
+                sim_tick: 1,
+                sim_time_us: 1_000,
+            },
+            lat_deg: 30.2672,
+            lon_deg: -97.7431,
+            alt_msl_m: 171.4,
+            vel_ned_mps: [0.0; 3],
+            sats: 12,
+            fix_type: 3,
+            reserved: [0; 2],
+        };
+
+        let snapshot = gps_to_lora_gps(
+            &gps,
+            LoraGpsSnapshotOptions {
+                time_ms: 100,
+                ground_speed_cms: 321,
+                heading_cdeg: 18_000,
+            },
+        );
+
+        assert_eq!(snapshot.lat_e7, 302_672_000);
+        assert_eq!(snapshot.lon_e7, -977_431_000);
+        assert_eq!(snapshot.alt_msl_dm, 1_714);
+        assert_eq!(snapshot.ground_speed_cms, 321);
+        assert_eq!(snapshot.heading_cdeg, 18_000);
+
+        let invalid = gps_to_lora_gps(
+            &GpsPayload { fix_type: 0, ..gps },
+            LoraGpsSnapshotOptions {
+                time_ms: 101,
+                ground_speed_cms: 0,
+                heading_cdeg: lora_scaling::HEADING_INVALID_CDEG,
+            },
+        );
+
+        assert_eq!(invalid.lat_e7, lora_scaling::LAT_LON_INVALID_E7);
+        assert_eq!(invalid.lon_e7, lora_scaling::LAT_LON_INVALID_E7);
+    }
+
+    #[test]
+    fn command_and_ack_translation_preserve_correlation() {
+        let translated = normal_command_to_lora(MsgType::MotorStop, 42, 9, 500, 0).unwrap();
+
+        assert_eq!(translated.command.command_id, lora_command_id::MOTOR_STOP);
+        assert_eq!(translated.command.command_seq, 9);
+        assert_eq!(
+            lora_command_to_normal(&translated.command).unwrap(),
+            NormalCommand::MotorStop
+        );
+
+        let rf_ack = ack_to_lora_command_ack(
+            NormalAckTranslation::Ack(AckPayload {
+                acked_seq: 42,
+                acked_msg_type: MsgType::MotorStop as u8,
+                status: 0,
+            }),
+            &translated.correlation,
+            lora_state::ARMED,
+        )
+        .unwrap();
+
+        assert_eq!(rf_ack.command_seq, 9);
+        assert_eq!(rf_ack.status, lora_command_status::ACCEPTED);
+
+        assert_eq!(
+            lora_command_ack_to_normal(&rf_ack, &translated.correlation).unwrap(),
+            NormalAckTranslation::Ack(AckPayload {
+                acked_seq: 42,
+                acked_msg_type: MsgType::MotorStop as u8,
+                status: lora_command_status::ACCEPTED,
+            })
+        );
+    }
+
+    #[test]
+    fn lora_flight_snapshot_rf_packet_round_trip() {
         let snapshot = LoRaFlightSnapshotPayload {
             time_ms: 12_345,
             state: lora_state::ARMED,
@@ -2316,23 +2901,18 @@ mod tests {
             fault_summary: lora_fault_summary::BARO,
         };
 
-        let mut raw = [0u8; raw_frame_len(LoRaFlightSnapshotPayload::WIRE_LEN)];
-        let mut encoded = [0u8; encoded_frame_len(LoRaFlightSnapshotPayload::WIRE_LEN)];
-        let encoded_len = encode_packet(&snapshot, 12, 5555, &mut raw, &mut encoded).unwrap();
+        let mut encoded = [0u8; rf_frame_len(LoRaFlightSnapshotPayload::WIRE_LEN)];
+        let encoded_len = encode_rf_packet(&snapshot, &mut encoded).unwrap();
 
-        let mut decoded_raw = [0u8; raw_frame_len(LoRaFlightSnapshotPayload::WIRE_LEN)];
-        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
-        let decoded = decode_payload::<LoRaFlightSnapshotPayload>(&packet).unwrap();
+        let packet = decode_rf_packet(&encoded[..encoded_len]).unwrap();
+        let decoded = decode_rf_payload::<LoRaFlightSnapshotPayload>(&packet).unwrap();
 
-        assert_eq!(
-            packet.header.message_type().unwrap(),
-            MsgType::LoRaFlightSnapshot
-        );
+        assert_eq!(packet.msg_type, RfMsgType::LoRaFlightSnapshot);
         assert_eq!(decoded, snapshot);
     }
 
     #[test]
-    fn lora_command_ack_packet_round_trip() {
+    fn lora_command_ack_rf_packet_round_trip() {
         let ack = LoRaCommandAckPayload {
             command_id: lora_command_id::SET_RADIO_PROFILE,
             command_seq: 77,
@@ -2343,24 +2923,19 @@ mod tests {
             detail: -1,
         };
 
-        let mut raw = [0u8; raw_frame_len(LoRaCommandAckPayload::WIRE_LEN)];
-        let mut encoded = [0u8; encoded_frame_len(LoRaCommandAckPayload::WIRE_LEN)];
-        let encoded_len = encode_packet(&ack, 13, 6666, &mut raw, &mut encoded).unwrap();
+        let mut encoded = [0u8; rf_frame_len(LoRaCommandAckPayload::WIRE_LEN)];
+        let encoded_len = encode_rf_packet(&ack, &mut encoded).unwrap();
 
-        let mut decoded_raw = [0u8; raw_frame_len(LoRaCommandAckPayload::WIRE_LEN)];
-        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
-        let decoded = decode_payload::<LoRaCommandAckPayload>(&packet).unwrap();
+        let packet = decode_rf_packet(&encoded[..encoded_len]).unwrap();
+        let decoded = decode_rf_payload::<LoRaCommandAckPayload>(&packet).unwrap();
 
-        assert_eq!(
-            packet.header.message_type().unwrap(),
-            MsgType::LoRaCommandAck
-        );
+        assert_eq!(packet.msg_type, RfMsgType::LoRaCommandAck);
         assert_eq!(decoded, ack);
     }
 
     #[test]
-    fn lora_v1_payloads_packet_round_trip() {
-        assert_packet_round_trip(
+    fn lora_v1_payloads_rf_packet_round_trip() {
+        assert_rf_packet_round_trip(
             LoRaGpsSnapshotPayload {
                 time_ms: 1_020,
                 lat_e7: 302_672_000,
@@ -2371,9 +2946,9 @@ mod tests {
                 sats: 12,
                 fix_type: 3,
             },
-            MsgType::LoRaGpsSnapshot,
+            RfMsgType::LoRaGpsSnapshot,
         );
-        assert_packet_round_trip(
+        assert_rf_packet_round_trip(
             LoRaEventPayload {
                 time_ms: 1_040,
                 event_id: lora_event_id::GPS_FIX_CHANGED,
@@ -2381,18 +2956,18 @@ mod tests {
                 arg0: -1,
                 arg1: 2,
             },
-            MsgType::LoRaEvent,
+            RfMsgType::LoRaEvent,
         );
-        assert_packet_round_trip(
+        assert_rf_packet_round_trip(
             LoRaFaultsPayload {
                 time_ms: 1_050,
                 active_faults: lora_fault::IMU,
                 latched_faults: lora_fault::IMU | lora_fault::MAG,
                 inhibit_flags: lora_fault_summary::BARO,
             },
-            MsgType::LoRaFaults,
+            RfMsgType::LoRaFaults,
         );
-        assert_packet_round_trip(
+        assert_rf_packet_round_trip(
             LoRaLinkStatusPayload {
                 time_ms: 1_060,
                 uplink_rssi_dbm: -95,
@@ -2406,9 +2981,9 @@ mod tests {
                 telemetry_rate_hz: 10,
                 reserved: 0,
             },
-            MsgType::LoRaLinkStatus,
+            RfMsgType::LoRaLinkStatus,
         );
-        assert_packet_round_trip(
+        assert_rf_packet_round_trip(
             LoRaCommandPayload {
                 command_id: lora_command_id::REQUEST_GPS,
                 command_seq: 88,
@@ -2417,9 +2992,9 @@ mod tests {
                 arg0: 1,
                 arg1: -2,
             },
-            MsgType::LoRaCommand,
+            RfMsgType::LoRaCommand,
         );
-        assert_packet_round_trip(
+        assert_rf_packet_round_trip(
             LoRaSetProfilePayload {
                 command_seq: 89,
                 profile: lora_profile::SF8_250KHZ_FALLBACK,
@@ -2428,14 +3003,14 @@ mod tests {
                 link_status_rate_hz: 1,
                 flags: 0,
             },
-            MsgType::LoRaSetProfile,
+            RfMsgType::LoRaSetProfile,
         );
-        assert_packet_round_trip(
+        assert_rf_packet_round_trip(
             LoRaRequestSnapshotPayload {
                 command_seq: 90,
                 request_flags: lora_request_flags::FLIGHT | lora_request_flags::GPS,
             },
-            MsgType::LoRaRequestSnapshot,
+            RfMsgType::LoRaRequestSnapshot,
         );
     }
 

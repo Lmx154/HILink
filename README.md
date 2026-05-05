@@ -3,6 +3,21 @@
 `hilink` is a no_std-first UART protocol crate for hardware-in-the-loop
 simulation and lightweight drone communication.
 
+Normal HILink is the semantic API spoken by flight controllers, ground-control
+software, simulators, and host tools. RF-specific dialects are transport
+internals owned by radio bridge firmware:
+
+```text
+GCS <-> GS radio module        normal HILink
+GS radio <-> vehicle radio     compact RF dialect
+vehicle radio <-> FC           normal HILink
+```
+
+FC and GCS endpoints must not emit or consume RF dialect messages directly.
+They send normal HILink commands and telemetry; radio firmware translates,
+prioritizes, compresses, retries, coalesces, or drops traffic according to RF
+budget.
+
 The first-class design goal is deterministic HIL correlation:
 
 - a sensor frame belongs to Gazebo or simulator tick `N`
@@ -228,17 +243,6 @@ pub enum MsgType {
     DshotCommand = 65,
     ActuatorStatusRequest = 66,
     ActuatorStatus = 67,
-
-    LoRaFlightSnapshot = 81,
-    LoRaGpsSnapshot = 83,
-    LoRaEvent = 85,
-    LoRaFaults = 86,
-    LoRaLinkStatus = 87,
-
-    LoRaCommand = 100,
-    LoRaCommandAck = 101,
-    LoRaSetProfile = 102,
-    LoRaRequestSnapshot = 103,
 }
 ```
 
@@ -271,16 +275,6 @@ Command/control messages:
 Bench telemetry messages:
 
 - `ActuatorStatus`
-
-LoRa flight radio messages:
-
-- `LoRaFlightSnapshot`: compact 10 Hz flight state
-- `LoRaGpsSnapshot`: compact GPS state, usually 1-2 Hz
-- `LoRaLinkStatus`: radio/link health, usually 1 Hz
-- `LoRaEvent` / `LoRaFaults`: immediate event and fault reporting
-- `LoRaCommand` / `LoRaCommandAck`: compact command envelope and ACK
-- `LoRaSetProfile` and `LoRaRequestSnapshot`: strongly typed radio-management
-  commands
 
 ## Bench Actuator Commands
 
@@ -565,11 +559,6 @@ Messages with `SimStamp`:
 Status payloads without `SimStamp`:
 
 - `ActuatorStatusPayload`: `20` bytes
-- `LoRaFlightSnapshotPayload`: `22` bytes
-- `LoRaGpsSnapshotPayload`: `22` bytes
-- `LoRaEventPayload`: `15` bytes
-- `LoRaFaultsPayload`: `14` bytes
-- `LoRaLinkStatusPayload`: `18` bytes
 
 Command payloads:
 
@@ -586,10 +575,6 @@ Command payloads:
 - `MotorStopPayload`: `0` bytes
 - `DshotCommandPayload`: `4` bytes
 - `ActuatorStatusRequestPayload`: `0` bytes
-- `LoRaCommandPayload`: `16` bytes
-- `LoRaCommandAckPayload`: `12` bytes
-- `LoRaSetProfilePayload`: `8` bytes
-- `LoRaRequestSnapshotPayload`: `4` bytes
 - `AckPayload`: `4` bytes
 - `NackPayload`: `4` bytes
 - `ControlWaypointPayload`: `40` bytes
@@ -601,29 +586,68 @@ Waypoint messages include `ref_stamp: SimStamp`. This does not require the FC to
 wait until that tick. It records the simulation context in which the command was
 generated.
 
-## LoRa Flight Radio Profile
+## RF Dialect Layer
 
-The LoRa dialect is optimized around small semantic packets rather than raw
-sensor or estimator frames. A complete HILink packet still carries the normal
-12-byte HILink header, 2-byte CRC, and COBS delimiter, so the LoRa payloads stay
-small: normally 12-28 bytes.
-
-The first-version active LoRa messages are:
+The RF dialect layer is optimized around small semantic packets rather than raw
+sensor or estimator frames. It is not normal HILink and it does not use the
+normal 12-byte HILink header or COBS UART delimiter. The compact RF frame is:
 
 ```text
-LoRaFlightSnapshot
-LoRaGpsSnapshot
-LoRaLinkStatus
-LoRaEvent
-LoRaFaults
-LoRaCommand
-LoRaCommandAck
-LoRaSetProfile
-LoRaRequestSnapshot
+rf_msg_type  1 byte
+payload      payload_len bytes
+crc16        2 bytes, little-endian CRC16-CCITT-FALSE over rf_msg_type + payload
+```
+
+Use `hilink::rf::encode_rf_packet`, `hilink::rf::decode_rf_packet`, and
+`hilink::rf::decode_rf_payload` for compact RF frames. Use `encode_packet` and
+`decode_packet` only for normal HILink UART frames. LoRa payload types and
+constants are also available under `hilink::rf::lora`.
+
+The crate also provides pure bridge helpers under `hilink::rf`:
+
+- `telemetry_to_lora_flight`
+- `gps_to_lora_gps`
+- `normal_command_to_lora`
+- `lora_command_to_normal`
+- `ack_to_lora_command_ack`
+- `lora_command_ack_to_normal`
+
+The first-version active LoRa RF messages are:
+
+```text
+RfMsgType::LoRaFlightSnapshot = 1
+RfMsgType::LoRaGpsSnapshot = 2
+RfMsgType::LoRaEvent = 3
+RfMsgType::LoRaFaults = 4
+RfMsgType::LoRaLinkStatus = 5
+RfMsgType::LoRaCommand = 16
+RfMsgType::LoRaCommandAck = 17
+RfMsgType::LoRaSetProfile = 18
+RfMsgType::LoRaRequestSnapshot = 19
 ```
 
 `LoRaHeartbeat`, `LoRaNavSnapshot`, and `LoRaPowerSnapshot` are intentionally
 left out of V1. `LoRaFlightSnapshot` already carries the heartbeat-level fields.
+
+Normal-to-RF examples:
+
+```text
+TelemetrySnapshot -> LoRaFlightSnapshot
+Gps -> LoRaGpsSnapshot
+System faults/events -> LoRaFaults / LoRaEvent
+Radio bridge health -> LoRaLinkStatus
+Normal HILink command -> compact command frame over RF
+RF command ACK -> normal HILink Ack/Nack
+```
+
+Telemetry translation may be lossy. Commands and command ACKs must preserve
+semantic intent and be tracked by the radio bridge using normal HILink sequence
+numbers and RF `command_seq`.
+
+Full-rate HIL traffic is normally wired/local. Over RF, the dialect layer may
+reject, throttle, summarize, or selectively forward `HilSensorFrame` and
+`HilResponseFrame` traffic. FC and GCS code still use the same normal HILink
+API; the radio bridge decides what the RF link can carry.
 
 Core telemetry:
 
@@ -706,13 +730,13 @@ reserved: u8
 detail: i32
 ```
 
-Command IDs live in `lora_command_id` and include `ARM`, `DISARM`, `ABORT`,
-`MOTOR_STOP`, `SET_MODE`, `SET_TELEMETRY_RATE`, `SET_RADIO_PROFILE`,
-`REQUEST_SNAPSHOT`, `REQUEST_GPS`, `REQUEST_FAULTS`,
+Command IDs live in `hilink::rf::lora::lora_command_id` and include `ARM`,
+`DISARM`, `ABORT`, `MOTOR_STOP`, `SET_MODE`, `SET_TELEMETRY_RATE`,
+`SET_RADIO_PROFILE`, `REQUEST_SNAPSHOT`, `REQUEST_GPS`, `REQUEST_FAULTS`,
 `ENTER_RECOVERY_BEACON`, and `PING`.
 
-ACK statuses live in `lora_command_status`: `ACCEPTED`, `REJECTED`,
-`DENIED_STATE`, `DENIED_SAFETY`, `INVALID_ARG`, `EXPIRED`,
+ACK statuses live in `hilink::rf::lora::lora_command_status`: `ACCEPTED`,
+`REJECTED`, `DENIED_STATE`, `DENIED_SAFETY`, `INVALID_ARG`, `EXPIRED`,
 `DUPLICATE_ACCEPTED`, `DUPLICATE_REJECTED`, and `BUSY`.
 
 Recommended scheduling:
@@ -727,7 +751,7 @@ Recommended scheduling:
 
 ### LoRa Field Meanings
 
-State values live in `lora_state`:
+State values live in `hilink::rf::lora::lora_state`:
 
 | Name | Value |
 | --- | ---: |
@@ -742,7 +766,7 @@ State values live in `lora_state`:
 | ABORT | 8 |
 | FAILSAFE | 9 |
 
-Mode values live in `lora_mode`:
+Mode values live in `hilink::rf::lora::lora_mode`:
 
 | Name | Value |
 | --- | ---: |
@@ -753,7 +777,7 @@ Mode values live in `lora_mode`:
 | HIL | 4 |
 | RECOVERY | 5 |
 
-`LoRaFlightSnapshotPayload.flags` uses `lora_flags`:
+`LoRaFlightSnapshotPayload.flags` uses `hilink::rf::lora::lora_flags`:
 
 | Flag | Bit |
 | --- | ---: |
@@ -766,7 +790,7 @@ Mode values live in `lora_mode`:
 | RADIO_DEGRADED | 6 |
 | RECOVERY_ACTIVE | 7 |
 
-`pyro_or_actuator_flags` uses `lora_pyro_actuator_flags`:
+`pyro_or_actuator_flags` uses `hilink::rf::lora::lora_pyro_actuator_flags`:
 
 | Flag | Bit |
 | --- | ---: |
@@ -778,7 +802,7 @@ Mode values live in `lora_mode`:
 | PYRO_FIRED_2 | 5 |
 | PYRO_INHIBITED | 6 |
 
-`fault_summary` is the low 16-bit summary of `lora_fault`:
+`fault_summary` is the low 16-bit summary of `hilink::rf::lora::lora_fault`:
 
 | Fault | Bit |
 | --- | ---: |
@@ -794,8 +818,8 @@ Mode values live in `lora_mode`:
 | PYRO | 9 |
 | SAFETY_INHIBIT | 10 |
 
-`LoRaEventPayload.event_id` uses `lora_event_id`, and `severity` uses
-`lora_event_severity`:
+`LoRaEventPayload.event_id` uses `hilink::rf::lora::lora_event_id`, and
+`severity` uses `hilink::rf::lora::lora_event_severity`:
 
 | Event | Value |
 | --- | ---: |
@@ -819,7 +843,7 @@ Mode values live in `lora_mode`:
 | ERROR | 2 |
 | CRITICAL | 3 |
 
-`LoRaCommandPayload.flags` uses `lora_command_flags`:
+`LoRaCommandPayload.flags` uses `hilink::rf::lora::lora_command_flags`:
 
 | Flag | Bit |
 | --- | ---: |
@@ -828,11 +852,11 @@ Mode values live in `lora_mode`:
 | ALLOW_WHILE_FAILSAFE | 2 |
 | QUEUE_IF_BUSY | 3 |
 
-`LoRaCommandAckPayload.reason` uses `lora_command_reason`: `NONE`, `BAD_STATE`,
-`SAFETY_INHIBIT`, `AUTH_REQUIRED`, `UNSUPPORTED`, `BAD_ARGUMENT`, `EXPIRED`,
-`DUPLICATE`, and `RADIO_BUSY`.
+`LoRaCommandAckPayload.reason` uses `hilink::rf::lora::lora_command_reason`:
+`NONE`, `BAD_STATE`, `SAFETY_INHIBIT`, `AUTH_REQUIRED`, `UNSUPPORTED`,
+`BAD_ARGUMENT`, `EXPIRED`, `DUPLICATE`, and `RADIO_BUSY`.
 
-`LoRaSetProfilePayload.flags` uses `lora_profile_flags`:
+`LoRaSetProfilePayload.flags` uses `hilink::rf::lora::lora_profile_flags`:
 
 | Flag | Bit |
 | --- | ---: |
@@ -849,7 +873,8 @@ Mode values live in `lora_mode`:
   Reserve `i32::MIN` as invalid.
 - `vertical_velocity_cms` is positive upward. Saturate to `i16::MIN..=i16::MAX`.
 - `lat_e7` and `lon_e7` are WGS84 degrees scaled by `1e7`; use
-  `lora_scaling::LAT_LON_INVALID_E7` (`i32::MIN`) when GPS is invalid.
+  `hilink::rf::lora::lora_scaling::LAT_LON_INVALID_E7` (`i32::MIN`) when GPS
+  is invalid.
 - `heading_cdeg` is centidegrees clockwise from true north; use `u16::MAX` when
   invalid.
 - `sats = 0`, `fix_type = 0`, invalid lat/lon, and `GPS_VALID` clear all mean
@@ -865,25 +890,29 @@ memory directly; the crate's field-by-field encoder is the wire contract.
 
 ### LoRa Link Ownership
 
-`LoRaLinkStatus` is owned by the radio or GS bridge. The bridge may emit it
-directly as HILink telemetry, or it may forward radio metadata to the FC and let
-the FC emit the packet. The important rule is that the source of uplink and
-downlink RSSI/SNR must be explicit in the bridge implementation.
+`LoRaLinkStatus` is owned by radio bridge firmware. The FC should not fabricate
+or emit RF link-status dialect frames. If the GCS needs link health over the
+normal HILink side, the GS radio module should translate RF link metadata into a
+normal HILink status/reporting message. The implementation must document which
+component owns uplink and downlink RSSI/SNR.
 
 ### LoRa Command Policy
 
-Use `LoRaCommand` for safety and mission commands: arm, disarm, abort, motor
-stop, mode changes, ping, and recovery beacon entry.
+Use `LoRaCommand` inside the RF dialect for safety and mission commands: arm,
+disarm, abort, motor stop, mode changes, ping, and recovery beacon entry. GCS
+and FC endpoints still send and receive normal HILink command messages such as
+`Arm`, `Disarm`, `Rtl`, `MotorStop`, `Ping`, `Ack`, and `Nack`.
 
-Use `LoRaSetProfile` and `LoRaRequestSnapshot` for common radio-management
-commands because they are compact and strongly typed. They still use
-`command_seq` and must receive `LoRaCommandAck`.
+Use `LoRaSetProfile` and `LoRaRequestSnapshot` inside the RF dialect for common
+radio-management commands because they are compact and strongly typed. They
+still use `command_seq` and must receive `LoRaCommandAck`.
 
-`command_seq` is per ground-station sender and monotonic modulo `u16`.
-Receivers keep a duplicate-result cache per sender. V1 cache depth is 16 command
-results or 30 seconds, whichever expires first. Duplicate commands return
-`DUPLICATE_ACCEPTED` or `DUPLICATE_REJECTED` with the original `reason` and
-`detail`.
+`command_seq` is per ground-station radio sender and monotonic modulo `u16`.
+Radio bridges keep the correlation between normal HILink `Header::seq` and RF
+`command_seq`. Receivers keep a duplicate-result cache per sender. V1 cache
+depth is 16 command results or 30 seconds, whichever expires first. Duplicate
+commands return `DUPLICATE_ACCEPTED` or `DUPLICATE_REJECTED` with the original
+`reason` and `detail`.
 
 ACK timeout and retry defaults:
 
@@ -1063,6 +1092,9 @@ The crate returns `hilink::Error`:
 - `CobsDecodeOverrun`: invalid COBS code overruns input
 - `CrcMismatch`: CRC16 validation failed
 - `UnknownMsgType`: `msg_type` is not recognized
+- `UnknownRfMsgType`: `rf_msg_type` is not recognized
+- `UnsupportedTranslation`: no defined normal/RF conversion exists
+- `CorrelationMismatch`: ACK/command correlation did not match
 - `InvalidPayloadLength`: payload decoder got the wrong byte length
 
 ## Testing
