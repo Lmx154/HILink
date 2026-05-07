@@ -276,6 +276,14 @@ Bench telemetry messages:
 
 - `ActuatorStatus`
 
+Reserved message IDs:
+
+- `Battery`
+- `RadioStatus`
+
+These IDs are recognized by `MsgType` for forward compatibility, but V1 does
+not define typed `BatteryPayload` or `RadioStatusPayload` wire payloads.
+
 ## Bench Actuator Commands
 
 Bench actuator commands are separate from both arming state and normal HIL motor
@@ -644,6 +652,13 @@ Telemetry translation may be lossy. Commands and command ACKs must preserve
 semantic intent and be tracked by the radio bridge using normal HILink sequence
 numbers and RF `command_seq`.
 
+The V1 Rust helper `normal_command_to_lora` currently defines direct mappings
+for `Ping`, `Arm`, `Disarm`, `Rtl`, and `MotorStop`. `Rtl` maps to
+`lora_command_id::ENTER_RECOVERY_BEACON`. Other command intents such as abort,
+mode changes, telemetry rate changes, profile changes, and snapshot requests
+are present in the RF dialect constants and payloads, but do not yet have a
+normal-command helper mapping.
+
 Full-rate HIL traffic is normally wired/local. Over RF, the dialect layer may
 reject, throttle, summarize, or selectively forward `HilSensorFrame` and
 `HilResponseFrame` traffic. FC and GCS code still use the same normal HILink
@@ -734,6 +749,15 @@ Command IDs live in `hilink::rf::lora::lora_command_id` and include `ARM`,
 `DISARM`, `ABORT`, `MOTOR_STOP`, `SET_MODE`, `SET_TELEMETRY_RATE`,
 `SET_RADIO_PROFILE`, `REQUEST_SNAPSHOT`, `REQUEST_GPS`, `REQUEST_FAULTS`,
 `ENTER_RECOVERY_BEACON`, and `PING`.
+
+Profiles live in `hilink::rf::lora::lora_profile`:
+
+| Profile | Value |
+| --- | ---: |
+| SF7_500KHZ_FAST | 0 |
+| SF8_500KHZ_BALANCED | 1 |
+| SF8_250KHZ_FALLBACK | 2 |
+| RECOVERY_BEACON | 3 |
 
 ACK statuses live in `hilink::rf::lora::lora_command_status`: `ACCEPTED`,
 `REJECTED`, `DENIED_STATE`, `DENIED_SAFETY`, `INVALID_ARG`, `EXPIRED`,
@@ -864,6 +888,16 @@ Mode values live in `hilink::rf::lora::lora_mode`:
 | SAVE_DEFAULT | 1 |
 | ENTER_RECOVERY_RX_WINDOWS | 2 |
 
+`LoRaRequestSnapshotPayload.request_flags` uses
+`hilink::rf::lora::lora_request_flags`:
+
+| Flag | Bit |
+| --- | ---: |
+| FLIGHT | 0 |
+| GPS | 1 |
+| FAULTS | 2 |
+| LINK_STATUS | 3 |
+
 ### LoRa Scaling And Saturation
 
 - `time_ms` is sender-local monotonic milliseconds and may wrap.
@@ -989,6 +1023,21 @@ fn uart_write(_bytes: &[u8]) {
 
 Use `encode_packet_raw` only when you need to set header fields manually.
 
+## Rust API Surface
+
+Normal HILink packets use `WirePayload`, `encode_packet`, `encode_packet_raw`,
+`decode_packet`, and `decode_payload`. Compact RF packets use `RfPayload`,
+`hilink::rf::encode_rf_packet`, `hilink::rf::decode_rf_packet`, and
+`hilink::rf::decode_rf_payload`.
+
+Decoded packet views are `DecodedPacket` and `hilink::rf::DecodedRfPacket`.
+Bridge metadata and conversion types are `CommandCorrelation`,
+`LoraCommandTranslation`, `LoraFlightSnapshotOptions`,
+`LoraGpsSnapshotOptions`, `NormalCommand`, and `NormalAckTranslation`.
+
+Traffic scheduling helpers are `hilink::rf::classify_normal_msg` and
+`hilink::rf::classify_rf_msg`, returning `hilink::rf::TrafficPriority`.
+
 ## Decoding Packets
 
 Feed one full COBS-delimited frame into `decode_packet`, including the final
@@ -1086,6 +1135,8 @@ The crate returns `hilink::Error`:
 - `BufferTooSmall`: caller-provided scratch/output buffer is too small
 - `PayloadTooLarge`: payload cannot fit in `Header::payload_len`
 - `HeaderTooShort`: decoded raw frame is shorter than a header
+- `InvalidHeader`: header version is not `PROTOCOL_VERSION` or reserved byte is
+  nonzero
 - `PayloadLenMismatch`: header length does not match the payload/body length
 - `BadDelimiter`: encoded frame does not end in `0x00`
 - `CobsDecodeZero`: invalid zero byte inside COBS data

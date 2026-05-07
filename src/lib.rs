@@ -21,6 +21,7 @@ pub enum Error {
     BufferTooSmall,
     PayloadTooLarge,
     HeaderTooShort,
+    InvalidHeader,
     PayloadLenMismatch,
     BadDelimiter,
     CobsDecodeZero,
@@ -1014,6 +1015,9 @@ pub fn decode_packet<'a>(input: &[u8], raw_scratch: &'a mut [u8]) -> Result<Deco
     }
 
     let header = Header::decode(&raw_scratch[..HEADER_LEN])?;
+    if header.version != PROTOCOL_VERSION || header.reserved != 0 {
+        return Err(Error::InvalidHeader);
+    }
     let payload_end = HEADER_LEN + usize::from(header.payload_len);
     if payload_end != packet_len {
         return Err(Error::PayloadLenMismatch);
@@ -2666,6 +2670,33 @@ mod tests {
         assert_eq!(packet.header.seq, 9);
         assert_eq!(packet.header.send_time_ms, 2222);
         assert_eq!(decoded, ready);
+    }
+
+    #[test]
+    fn decode_rejects_invalid_header_fields() {
+        let ready = HilReadyPayload;
+        let mut header = Header::new(MsgType::HilReady, 9, 2222, HilReadyPayload::WIRE_LEN as u16);
+        header.version = PROTOCOL_VERSION + 1;
+
+        let mut raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(HilReadyPayload::WIRE_LEN)];
+        let encoded_len = encode_packet_raw(&header, &ready, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        assert_eq!(
+            decode_packet(&encoded[..encoded_len], &mut decoded_raw),
+            Err(Error::InvalidHeader)
+        );
+
+        header.version = PROTOCOL_VERSION;
+        header.reserved = 1;
+        let encoded_len = encode_packet_raw(&header, &ready, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        assert_eq!(
+            decode_packet(&encoded[..encoded_len], &mut decoded_raw),
+            Err(Error::InvalidHeader)
+        );
     }
 
     #[test]

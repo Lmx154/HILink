@@ -28,6 +28,22 @@ FC and GCS endpoints must not emit or consume RF dialect messages directly.
 
 Header length: 12 bytes.
 
+Header rules:
+
+- `version` must be `1`
+- `reserved` must be `0`
+- receivers reject packets with any other header version or nonzero reserved
+  byte
+
+Header flags:
+
+| Name | Bit |
+| --- | ---: |
+| header_flags::REQUEST_ACK | 0 |
+| header_flags::RETRANSMISSION | 1 |
+| header_flags::MORE_FRAGMENTS | 2 |
+| header_flags::URGENT_CONTROL | 3 |
+
 ## Message IDs
 
 | ID | Message | Payload | Direction |
@@ -68,6 +84,9 @@ Header length: 12 bytes.
 
 Normal HILink messages are the semantic API spoken by FC, GCS, host tools, and
 simulators. RF dialect messages are not valid `MsgType` values.
+
+`Battery` and `RadioStatus` are reserved normal HILink IDs in V1. They are
+recognized `MsgType` values, but no typed V1 payload is defined for them.
 
 ## Payload Sizes
 
@@ -112,6 +131,30 @@ simulators. RF dialect messages are not valid `MsgType` values.
 | ---: | --- | --- | ---: |
 | 0 | sim_tick | u64 | 8 |
 | 8 | sim_time_us | u64 | 8 |
+
+### Validity and Response Flags
+
+`HilSensorFrame.valid_flags`:
+
+| Name | Bit |
+| --- | ---: |
+| valid::ACCEL | 0 |
+| valid::GYRO | 1 |
+| valid::MAG | 2 |
+| valid::BARO | 3 |
+| valid::GPS | 4 |
+| valid::BATTERY | 5 |
+| valid::RADIO | 6 |
+
+`HilResponseFrame.flags`, `HeartbeatPayload.flags`,
+`SystemStatePayload.flags`, and `TelemetrySnapshotPayload.flags`:
+
+| Name | Bit |
+| --- | ---: |
+| response_flags::ARMED | 0 |
+| response_flags::FAILSAFE | 1 |
+| response_flags::ESTIMATOR_VALID | 2 |
+| response_flags::MOTORS_VALID | 3 |
 
 ## Runtime Payloads
 
@@ -199,6 +242,12 @@ Pure bridge helpers are also available under `hilink::rf`:
 | `lora_command_to_normal` | Convert supported RF commands back into normal command identities |
 | `ack_to_lora_command_ack` | Convert normal `Ack`/`Nack` into RF command ACK using correlation metadata |
 | `lora_command_ack_to_normal` | Convert RF command ACK back into normal `Ack`/`Nack` using correlation metadata |
+
+The V1 helper mapping is intentionally narrower than the full RF command ID
+space: `Ping`, `Arm`, `Disarm`, `Rtl`, and `MotorStop` are mapped by
+`normal_command_to_lora`. `Rtl` maps to
+`lora_command_id::ENTER_RECOVERY_BEACON`. Other RF command IDs are available for
+bridge firmware or future normal-command mappings.
 
 V1 active RF message types:
 
@@ -333,6 +382,15 @@ Recommended scheduling:
 | SF8/500 kHz | 5-10 Hz flight snapshots, 1 Hz GPS, 1 Hz link status, commands preempt telemetry |
 | SF8/250 kHz fallback | 5 Hz flight snapshots, 0.5-1 Hz GPS, 1 Hz link status or folded heartbeat |
 | Recovery beacon | 1 Hz or lower, flight and GPS alternating, debug disabled |
+
+LoRa profiles:
+
+| Name | Value |
+| --- | ---: |
+| lora_profile::SF7_500KHZ_FAST | 0 |
+| lora_profile::SF8_500KHZ_BALANCED | 1 |
+| lora_profile::SF8_250KHZ_FALLBACK | 2 |
+| lora_profile::RECOVERY_BEACON | 3 |
 
 LoRa command IDs:
 
@@ -492,6 +550,15 @@ Profile flags:
 | lora_profile_flags::SAVE_DEFAULT | 1 |
 | lora_profile_flags::ENTER_RECOVERY_RX_WINDOWS | 2 |
 
+Snapshot request flags:
+
+| Name | Bit |
+| --- | ---: |
+| lora_request_flags::FLIGHT | 0 |
+| lora_request_flags::GPS | 1 |
+| lora_request_flags::FAULTS | 2 |
+| lora_request_flags::LINK_STATUS | 3 |
+
 ### LoRa Scaling And Scheduling
 
 Scaling rules:
@@ -537,6 +604,12 @@ ACK timeout defaults:
 Bridge helpers return `UnsupportedTranslation` when no V1 mapping is defined
 for a message, and `CorrelationMismatch` when a normal ACK/NACK does not match
 the RF command correlation metadata.
+
+API support types exposed by the Rust crate include `DecodedPacket`,
+`DecodedRfPacket`, `TrafficPriority`, `CommandCorrelation`,
+`LoraFlightSnapshotOptions`, `LoraGpsSnapshotOptions`,
+`LoraCommandTranslation`, `NormalCommand`, and `NormalAckTranslation`.
+Scheduling helpers are `classify_normal_msg` and `classify_rf_msg`.
 
 Scheduler priorities:
 
